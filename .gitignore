@@ -1,0 +1,26 @@
+# Dependencies
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
+
+# Environment & secrets
+backend/.env
+frontend/.env.local
+frontend/.env
+
+# Logs
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Design exports (large binary assets)
+design/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
