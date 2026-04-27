@@ -36,13 +36,13 @@ export function TourCardComponent({
 
   return (
     <div
-      className="group flex gap-4 p-4 rounded-xl border border-border bg-card
+      className="group flex flex-col sm:flex-row gap-3 sm:gap-4 p-3 sm:p-4 rounded-xl border border-border bg-card
                  hover:shadow-lg hover:-translate-y-0.5
                  transition-all duration-200 cursor-pointer"
       onClick={() => onDetails?.(card)}
     >
       {/* Hotel Photo */}
-      <div className="w-40 h-28 rounded-lg shrink-0 overflow-hidden relative">
+      <div className="w-full h-40 sm:w-40 sm:h-28 rounded-lg shrink-0 overflow-hidden relative">
         {imgSrc && !imgError ? (
           <img
             src={imgSrc}
@@ -148,12 +148,13 @@ export function TourCardComponent({
             <p className="text-xs text-muted-foreground">
               {card.nights} ночей · {formatPricePerNight(card.price, card.nights)}
             </p>
+            <p className="text-[10px] text-muted-foreground/60 mt-0.5">через mgp.ru</p>
           </div>
 
           <div className="flex items-center gap-2">
             <button
               onClick={(e) => { e.stopPropagation(); onFavorite?.(card); }}
-              className="p-1.5 hover:text-red-500 transition-colors"
+              className="p-2.5 hover:text-red-500 transition-colors"
             >
               <Heart
                 className={cn(
@@ -177,6 +178,18 @@ export function TourCardComponent({
 
         {card._warning && (
           <p className="text-xs text-amber-600 mt-2">{card._warning}</p>
+        )}
+        {card._refreshStatus && card._refreshStatus !== "ok" && card._refreshMessage && (
+          <p
+            className={cn(
+              "text-xs mt-1.5",
+              card._refreshStatus === "expired" && "text-amber-600",
+              (card._refreshStatus === "unavailable" || card._refreshStatus === "error") &&
+                "text-red-500"
+            )}
+          >
+            {card._refreshMessage}
+          </p>
         )}
       </div>
     </div>

@@ -1,3 +1,5 @@
+export type FavoriteRefreshStatus = "ok" | "expired" | "unavailable" | "error";
+
 export interface TourCard {
   hotel_name: string;
   hotel_stars: number;
@@ -35,6 +37,8 @@ export interface TourCard {
   _position?: number;
   _warning?: string | null;
   _adults_only_warning?: string | null;
+  _refreshStatus?: FavoriteRefreshStatus | null;
+  _refreshMessage?: string | null;
 }
 
 export interface HotelReview {

@@ -1,6 +1,8 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter, Montserrat } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { AuthProvider } from "@/contexts/AuthContext";
+import { FavoritesProvider } from "@/contexts/FavoritesContext";
 import "./globals.css";
 
 const inter = Inter({
@@ -12,6 +14,13 @@ const montserrat = Montserrat({
   variable: "--font-montserrat",
   subsets: ["latin", "cyrillic"],
 });
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  viewportFit: "cover",
+};
 
 export const metadata: Metadata = {
   title: "Навылет — AI-помощник для путешествий",
@@ -27,7 +36,11 @@ export default function RootLayout({
   return (
     <html lang="ru">
       <body className={`${inter.variable} ${montserrat.variable} antialiased`}>
-        <TooltipProvider>{children}</TooltipProvider>
+        <AuthProvider>
+          <FavoritesProvider>
+            <TooltipProvider>{children}</TooltipProvider>
+          </FavoritesProvider>
+        </AuthProvider>
       </body>
     </html>
   );

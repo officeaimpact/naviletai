@@ -552,6 +552,43 @@ def get_metrics():
         return jsonify(aggregated)
 
 
+@app.route('/api/tour/<tourid>/actualize')
+def actualize_tour_endpoint(tourid):
+    """Price actualization for a specific tour (no AI, no LLM tokens)."""
+    from tourvisor_client import TourVisorClient, TourIdExpiredError
+
+    async def _fetch():
+        client = TourVisorClient()
+        try:
+            return await client.actualize_tour(tourid)
+        finally:
+            await client.close()
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        data = loop.run_until_complete(_fetch())
+        loop.close()
+        raw_price = data.get("price")
+        price = None
+        if raw_price is not None:
+            try:
+                price = int(float(str(raw_price)))
+            except (ValueError, TypeError):
+                pass
+        return jsonify({
+            "price": price,
+            "operator": data.get("operatorname"),
+            "available": not data.get("iserror", False),
+        })
+    except TourIdExpiredError:
+        logger.warning("actualize expired tourid=%s", tourid)
+        return jsonify({"error": "expired", "available": False}), 410
+    except Exception as e:
+        logger.exception("actualize error tourid=%s", tourid)
+        return jsonify({"error": str(e), "available": False}), 500
+
+
 @app.route('/api/tour/<tourid>/flights')
 def tour_flights(tourid):
     """Flight details for a specific tour (no AI, no LLM tokens)."""
@@ -571,6 +608,14 @@ def tour_flights(tourid):
         asyncio.set_event_loop(loop)
         data = loop.run_until_complete(_fetch())
         loop.close()
+
+        if data.get("iserror"):
+            err_msg = data.get("errormessage", "")
+            if "TourID" in err_msg or "tourid" in err_msg.lower():
+                logger.warning("tour_flights expired (iserror) tourid=%s msg=%s", tourid, err_msg)
+                return jsonify({"error": "expired", "flights": []}), 410
+            logger.warning("tour_flights iserror tourid=%s msg=%s", tourid, err_msg)
+            return jsonify({"error": err_msg or "unknown", "flights": []}), 502
 
         raw_flights = data.get("flights", [])
         flights = []

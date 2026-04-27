@@ -52,12 +52,23 @@ class NoResultsError(TourVisorError):
 class TourVisorClient:
     """Асинхронный клиент TourVisor API"""
     
-    def __init__(self):
-        self.base_url = os.getenv("TOURVISOR_BASE_URL", "https://tourvisor.ru/xml")
-        self.auth_login = os.getenv("TOURVISOR_AUTH_LOGIN")
-        self.auth_pass = os.getenv("TOURVISOR_AUTH_PASS")
+    def __init__(self, runtime_config=None):
+        self.runtime_config = runtime_config
+        self.base_url = (
+            getattr(runtime_config, "tourvisor_base_url", None)
+            or os.getenv("TOURVISOR_BASE_URL", "https://tourvisor.ru/xml")
+        )
+        self.auth_login = (
+            getattr(runtime_config, "tourvisor_login", None)
+            or os.getenv("TOURVISOR_AUTH_LOGIN")
+        )
+        self.auth_pass = (
+            getattr(runtime_config, "tourvisor_pass", None)
+            or os.getenv("TOURVISOR_AUTH_PASS")
+        )
+        self.api_call_log: List[Dict] = []
     
-    async def _request(self, endpoint: str, params: Dict[str, Any] = None) -> Dict:
+    async def _request(self, endpoint: str, params: Dict[str, Any] = None, timeout: Optional[float] = None) -> Dict:
         """
         Базовый запрос к API с обработкой ошибок
         
@@ -68,6 +79,21 @@ class TourVisorClient:
         """
         if params is None:
             params = {}
+        
+        # --- Redis cache для словарей (list.php) ---
+        _cache_key = None
+        if endpoint == "list.php":
+            try:
+                from cache import cache_get, cache_set, is_cache_available
+                if is_cache_available():
+                    _safe = {k: v for k, v in params.items() if k not in ("authlogin", "authpass")}
+                    _cache_key = f"tv:dict:{_safe.get('type', 'unknown')}:{hash(json.dumps(_safe, sort_keys=True))}"
+                    cached = cache_get(_cache_key)
+                    if cached is not None:
+                        logger.info("🌐 TOURVISOR << %s  CACHE HIT  key=%s", endpoint, _cache_key[:60])
+                        return cached
+            except ImportError:
+                pass
         
         # Добавляем авторизацию
         params["authlogin"] = self.auth_login
@@ -84,10 +110,18 @@ class TourVisorClient:
         # Создаём новый клиент для каждого запроса (избегаем Event loop is closed)
         # Fix M6+F8: Таймаут для actdetail/actualize — 30с (если оператор не ответил за 30с,
         # ждать дольше бессмысленно; при ReadTimeout сработает retry P14 + fallback F2)
-        _timeout = 30.0 if endpoint in ("actdetail.php", "actualize.php") else 30.0
-        # Fix P14: Ретрай при ReadTimeout для actdetail/actualize
-        _max_attempts = 2 if endpoint in ("actdetail.php", "actualize.php") else 1
-        for _attempt in range(_max_attempts):
+        _default_timeout = 30.0 if endpoint in ("actdetail.php", "actualize.php") else 30.0
+        _timeout = timeout if timeout is not None else _default_timeout
+        # Fix P14: ReadTimeout retry ТОЛЬКО для actdetail/actualize
+        _max_timeout_attempts = 2 if endpoint in ("actdetail.php", "actualize.php") else 1
+        # DNS/network retry для расширенного набора endpoint'ов
+        _network_retry_endpoints = {"actdetail.php", "actualize.php", "search.php", "result.php", "list.php"}
+        _max_network_attempts = 3 if endpoint in _network_retry_endpoints else 1
+
+        _timeout_attempts_done = 0
+        _network_attempts_done = 0
+        _total_max = max(_max_timeout_attempts, _max_network_attempts) * 2
+        for _loop in range(_total_max):
             try:
                 async with httpx.AsyncClient(timeout=_timeout) as client:
                     response = await client.get(url, params=params)
@@ -96,39 +130,95 @@ class TourVisorClient:
                                 endpoint, response.status_code, elapsed_ms, len(response.content))
                     response.raise_for_status()
                     data = response.json()
-                break  # Успешно — выходим из цикла
+                break
             except httpx.ReadTimeout:
+                _timeout_attempts_done += 1
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
-                if _attempt < _max_attempts - 1:
+                if _timeout_attempts_done < _max_timeout_attempts:
                     logger.warning("⏱️ TOURVISOR TIMEOUT %s  %dms — retrying (attempt %d/%d)",
-                                   endpoint, elapsed_ms, _attempt + 1, _max_attempts)
+                                   endpoint, elapsed_ms, _timeout_attempts_done, _max_timeout_attempts)
                     t0 = time.perf_counter()
                     continue
                 logger.error("🌐 TOURVISOR !! %s  TIMEOUT  %dms  (all %d attempts failed)",
-                             endpoint, elapsed_ms, _max_attempts)
+                             endpoint, elapsed_ms, _max_timeout_attempts)
+                self._log_api_call(endpoint, 0, 0, elapsed_ms, error="ReadTimeout")
                 raise
             except httpx.HTTPStatusError as e:
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
                 logger.error("🌐 TOURVISOR !! %s  HTTP %s  %dms  error=%s",
                              endpoint, e.response.status_code, elapsed_ms, str(e)[:200])
+                self._log_api_call(endpoint, e.response.status_code, 0, elapsed_ms,
+                                   error=str(e)[:500])
                 raise
             except httpx.RequestError as e:
+                _network_attempts_done += 1
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
-                logger.error("🌐 TOURVISOR !! %s  NETWORK ERROR  %dms  error=%s",
-                             endpoint, elapsed_ms, str(e)[:200])
+                if _network_attempts_done < _max_network_attempts:
+                    logger.warning("🔄 TOURVISOR DNS/NETWORK %s  %dms — retrying (attempt %d/%d): %s",
+                                   endpoint, elapsed_ms, _network_attempts_done, _max_network_attempts, str(e)[:150])
+                    await asyncio.sleep(1)
+                    t0 = time.perf_counter()
+                    continue
+                logger.error("🌐 TOURVISOR !! %s  NETWORK ERROR  %dms  (all %d attempts failed): %s",
+                             endpoint, elapsed_ms, _max_network_attempts, str(e)[:200])
+                self._log_api_call(endpoint, 0, 0, elapsed_ms, error=str(e)[:500])
                 raise
         
         # Логируем ключевые поля ответа
+        _final_elapsed = int((time.perf_counter() - t0) * 1000) if 'elapsed_ms' not in dir() else elapsed_ms
         preview = json.dumps(data, ensure_ascii=False, default=str)
         if len(preview) > 500:
             preview = preview[:500] + "…"
         logger.debug("🌐 TOURVISOR << %s  body=%s", endpoint, preview)
+
+        self.api_call_log.append({
+            "service": "tourvisor",
+            "endpoint": endpoint,
+            "response_code": response.status_code if 'response' in dir() else None,
+            "response_bytes": len(response.content) if 'response' in dir() else None,
+            "latency_ms": _final_elapsed,
+        })
+        
+        # --- Запись в api_calls (PostgreSQL) ---
+        self._log_api_call(endpoint, response.status_code, len(response.content), elapsed_ms)
         
         # Проверяем на ошибки API (HTTP 200, но есть errormessage)
         self._check_api_error(data, endpoint)
         
+        # --- Сохраняем в Redis cache (словари) ---
+        if _cache_key is not None:
+            try:
+                from cache import cache_set
+                cache_set(_cache_key, data, ttl_seconds=86400)
+                logger.debug("🌐 TOURVISOR CACHE SET  key=%s", _cache_key[:60])
+            except ImportError:
+                pass
+        
         return data
     
+    @staticmethod
+    def _log_api_call(endpoint: str, status_code: int, response_bytes: int,
+                      latency_ms: int, error: str = None):
+        """Record external API call in PostgreSQL (fire-and-forget)."""
+        try:
+            from database import get_db, is_db_available
+            if not is_db_available():
+                return
+            from models import ApiCall
+            with get_db() as db:
+                if db is None:
+                    return
+                db.add(ApiCall(
+                    service="tourvisor",
+                    endpoint=endpoint,
+                    response_code=status_code,
+                    response_bytes=response_bytes,
+                    latency_ms=latency_ms,
+                    error=error,
+                ))
+        except Exception:
+            pass
+
     def _check_api_error(self, data: Dict, endpoint: str):
         """
         Проверить ответ на ошибки API
@@ -136,12 +226,20 @@ class TourVisorClient:
         Известные ошибки:
         - "Wrong (obsolete) TourID." — tourid истёк
         - "no search results" в status.state — requestid не найден
+        - {"error": {"errormessage": "..."}} — auth/validation (search.php, list.php)
         """
         # Fix D1: Логируем top-level iserror (actdetail.php возвращает ошибки на верхнем уровне)
         # НЕ бросаем исключение — dispatch обрабатывает fallback через F2
         if data.get("iserror"):
             logger.warning("🌐 TOURVISOR API ERROR [%s] (top-level iserror): %s",
                            endpoint, data.get("errormessage", "unknown"))
+        
+        # Top-level {"error": {"errormessage": "..."}} — auth/validation errors
+        if "error" in data and isinstance(data["error"], dict):
+            err_msg = data["error"].get("errormessage", "").strip()
+            if err_msg:
+                logger.error("🌐 TOURVISOR API ERROR [%s]: %s", endpoint, err_msg)
+                raise TourVisorAPIError(err_msg, data)
         
         # Проверка на errormessage (например, для actualize.php)
         if "data" in data:
@@ -257,7 +355,8 @@ class TourVisorClient:
             "flydeparture": departure_id,
             "flycountry": country_id
         })
-        flydates = data.get("lists", {}).get("flydates", {}).get("flydate", [])
+        _flydates_obj = data.get("lists", {}).get("flydates") or {}
+        flydates = _flydates_obj.get("flydate", [])
         return flydates if isinstance(flydates, list) else [flydates]
     
     async def get_currencies(self) -> List[Dict]:
@@ -553,7 +652,8 @@ class TourVisorClient:
     async def get_tour_details(
         self, 
         tour_id: str,
-        currency: int = 0  # 0=RUB, 1=USD/EUR, 2=BYR, 3=KZT
+        currency: int = 0,  # 0=RUB, 1=USD/EUR, 2=BYR, 3=KZT
+        timeout: Optional[float] = None
     ) -> Dict:
         """
         Получить детальную информацию о туре (рейсы, доплаты)
@@ -568,7 +668,7 @@ class TourVisorClient:
             params["currency"] = currency
         
         try:
-            data = await self._request("actdetail.php", params)
+            data = await self._request("actdetail.php", params, timeout=timeout)
         except TourIdExpiredError as e:
             e.args = (
                 "Данные тура устарели. Нужен новый поиск для получения деталей рейсов.",

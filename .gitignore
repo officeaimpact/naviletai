@@ -24,3 +24,10 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+backend/venv/
+
+# Local Cursor workspace files
+.cursor/
+
+# Accidental npm lockfile in Python backend
+backend/package-lock.json

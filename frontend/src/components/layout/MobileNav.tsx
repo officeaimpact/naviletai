@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -10,10 +10,21 @@ import {
 } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Menu, Plus, Heart, MessageSquare } from "lucide-react";
+
+import {
+  Menu,
+  Plus,
+  Heart,
+  Info,
+  Handshake,
+  MessageSquare,
+  LogOut,
+  User,
+  ChevronRight,
+} from "lucide-react";
 import { ChatSession } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/hooks/useAuth";
 
 interface MobileNavProps {
   sessions: ChatSession[];
@@ -21,8 +32,13 @@ interface MobileNavProps {
   onNewChat: () => void;
   onSelectSession: (id: string) => void;
   onFavoritesClick: () => void;
+  onAboutClick?: () => void;
+  onPartnersClick?: () => void;
   onLogoClick: () => void;
+  onAuthClick?: () => void;
   isFavoritesActive?: boolean;
+  isAboutActive?: boolean;
+  isPartnersActive?: boolean;
 }
 
 export function MobileNav({
@@ -31,11 +47,14 @@ export function MobileNav({
   onNewChat,
   onSelectSession,
   onFavoritesClick,
+  onAboutClick,
+  onPartnersClick,
   onLogoClick,
+  onAuthClick,
   isFavoritesActive = false,
+  isAboutActive = false,
+  isPartnersActive = false,
 }: MobileNavProps) {
-  const router = useRouter();
-
   return (
     <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-border bg-background">
       <Sheet>
@@ -76,6 +95,32 @@ export function MobileNav({
                 <Heart className={cn("h-4 w-4", isFavoritesActive && "fill-red-500 text-red-500")} />
                 Избранное
               </Button>
+              <Button
+                variant="ghost"
+                className={cn(
+                  "w-full justify-start gap-2",
+                  isAboutActive
+                    ? "bg-muted text-foreground"
+                    : "text-muted-foreground"
+                )}
+                onClick={onAboutClick}
+              >
+                <Info className="h-4 w-4" />
+                О нас
+              </Button>
+              <Button
+                variant="ghost"
+                className={cn(
+                  "w-full justify-start gap-2",
+                  isPartnersActive
+                    ? "bg-muted text-foreground"
+                    : "text-muted-foreground"
+                )}
+                onClick={onPartnersClick}
+              >
+                <Handshake className="h-4 w-4" />
+                Партнёрам
+              </Button>
             </div>
 
             <Separator className="my-3" />
@@ -87,12 +132,17 @@ export function MobileNav({
             </div>
 
             <ScrollArea className="flex-1 px-2">
+              {sessions.length === 0 && (
+                <p className="px-3 py-4 text-xs text-muted-foreground/50 text-center">
+                  Начните диалог, чтобы увидеть историю
+                </p>
+              )}
               {sessions.map((session) => (
                 <button
                   key={session.id}
                   onClick={() => onSelectSession(session.id)}
                   className={cn(
-                    "w-full text-left px-3 py-2 rounded-lg text-sm truncate transition-colors",
+                    "w-full text-left px-3 py-2 min-h-[44px] flex items-center rounded-lg text-sm truncate transition-colors",
                     activeSessionId === session.id && !isFavoritesActive
                       ? "bg-muted text-foreground"
                       : "text-muted-foreground hover:bg-muted/50"
@@ -103,24 +153,7 @@ export function MobileNav({
               ))}
             </ScrollArea>
 
-            <div className="p-3 border-t border-border">
-              <button
-                onClick={() => router.push("/profile")}
-                className="flex items-center gap-3 w-full p-1 rounded-lg hover:bg-muted"
-              >
-                <Avatar className="h-8 w-8">
-                  <AvatarFallback className="bg-brand text-white text-xs font-semibold">
-                    E
-                  </AvatarFallback>
-                </Avatar>
-                <div className="flex-1 min-w-0 text-left">
-                  <p className="text-sm font-medium truncate">Eva Mendes</p>
-                  <p className="text-xs text-muted-foreground truncate">
-                    eva@example.com
-                  </p>
-                </div>
-              </button>
-            </div>
+            <MobileNavFooter onAuthClick={onAuthClick} />
           </div>
         </SheetContent>
       </Sheet>
@@ -136,6 +169,86 @@ export function MobileNav({
       >
         <Plus className="h-5 w-5" />
       </Button>
+    </div>
+  );
+}
+
+function MobileNavFooter({ onAuthClick }: { onAuthClick?: () => void }) {
+  const { user, signOut } = useAuth();
+  const [showMenu, setShowMenu] = useState(false);
+
+  const initials = user?.user_metadata?.name
+    ? user.user_metadata.name.slice(0, 1).toUpperCase()
+    : user?.email?.slice(0, 1).toUpperCase() || "";
+  const displayName =
+    user?.user_metadata?.name || user?.email?.split("@")[0] || "";
+
+  return (
+    <div className="border-t border-border">
+      {user ? (
+        <div className="relative">
+          <button
+            onClick={() => setShowMenu(!showMenu)}
+            className="w-full px-3 py-3 flex items-center gap-2.5 hover:bg-muted/50 active:bg-muted transition-colors"
+          >
+            <div className="h-9 w-9 rounded-full bg-gradient-to-br from-brand to-blue-400 flex items-center justify-center shrink-0">
+              <span className="text-sm font-semibold text-white">{initials}</span>
+            </div>
+            <div className="flex-1 min-w-0 text-left">
+              <p className="text-sm font-medium truncate leading-tight">
+                {displayName}
+              </p>
+              {user.email && (
+                <p className="text-[11px] text-muted-foreground truncate leading-tight mt-0.5">
+                  {user.email}
+                </p>
+              )}
+            </div>
+            <ChevronRight
+              className={cn(
+                "h-4 w-4 text-muted-foreground shrink-0 transition-transform",
+                showMenu && "rotate-90"
+              )}
+            />
+          </button>
+
+          {showMenu && (
+            <div className="px-2 pb-2">
+              <button
+                onClick={() => {
+                  signOut();
+                  setShowMenu(false);
+                }}
+                className="w-full flex items-center gap-2.5 px-3 py-2.5 text-sm text-muted-foreground hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+              >
+                <LogOut className="h-4 w-4" />
+                Выйти из аккаунта
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <button
+          onClick={onAuthClick}
+          className="w-full px-3 py-3 flex items-center gap-2.5 hover:bg-muted/50 active:bg-muted transition-colors"
+        >
+          <div className="h-9 w-9 rounded-full border-2 border-dashed border-muted-foreground/30 flex items-center justify-center shrink-0">
+            <User className="h-4 w-4 text-muted-foreground" />
+          </div>
+          <div className="flex-1 min-w-0 text-left">
+            <p className="text-sm font-medium text-foreground">Войти</p>
+            <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">
+              Сохраняйте чаты и избранное
+            </p>
+          </div>
+        </button>
+      )}
+
+      <div className="px-3 pb-2.5 pt-0.5">
+        <p className="text-[10px] text-muted-foreground/40 text-center leading-tight">
+          Данные предоставлены «Магазин Горящих Путёвок»
+        </p>
+      </div>
     </div>
   );
 }

@@ -1,4 +1,9 @@
-import { ChatResponse, HotelInfo, TourFlights } from "./types";
+import {
+  ChatResponse,
+  FavoriteRefreshStatus,
+  HotelInfo,
+  TourFlights,
+} from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -34,6 +39,73 @@ export async function getTourFlights(tourId: string): Promise<TourFlights> {
     _flightCache.set(tourId, data);
   }
   return data;
+}
+
+export async function actualizeTour(
+  tourId: string
+): Promise<{
+  price?: number;
+  operator?: string;
+  available: boolean;
+  error?: string;
+  status: FavoriteRefreshStatus;
+  message?: string;
+}> {
+  const res = await fetch(`${API_BASE}/api/tour/${tourId}/actualize`);
+  const body = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    if (res.status === 410 || body?.error === "expired") {
+      return {
+        available: false,
+        error: "expired",
+        status: "expired",
+        message: "Тур устарел",
+      };
+    }
+
+    return {
+      available: false,
+      error: body?.error || `Server error: ${res.status}`,
+      status: "error",
+      message: "Не удалось обновить",
+    };
+  }
+
+  if (body?.available && typeof body?.price === "number") {
+    return {
+      price: body.price,
+      operator: body.operator,
+      available: true,
+      status: "ok",
+      message: "Цена обновлена",
+    };
+  }
+
+  if (body?.error === "expired") {
+    return {
+      available: false,
+      error: "expired",
+      status: "expired",
+      message: "Тур устарел",
+    };
+  }
+
+  if (body?.available === false) {
+    return {
+      available: false,
+      error: body?.error,
+      status: "unavailable",
+      message: "Нет в наличии",
+    };
+  }
+
+  return {
+    available: false,
+    error: body?.error || "unknown",
+    status: "error",
+    message: "Не удалось обновить",
+  };
 }
 
 export function fixImageUrl(url: string | null | undefined): string {

@@ -27,9 +27,12 @@ export function WelcomeScreen({ onSend, isLoading }: WelcomeScreenProps) {
       >
         <h1 className="text-3xl md:text-4xl font-bold tracking-tight leading-snug">
           Привет, я помогу тебе подобрать
-          <br />
-          идеальное путешествие
+          <br className="hidden sm:inline" />
+          {" "}идеальное путешествие
         </h1>
+        <p className="text-sm text-muted-foreground mt-3">
+          Подбираю туры из предложений 100+ туроператоров
+        </p>
       </motion.div>
 
       <motion.div

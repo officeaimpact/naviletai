@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/hooks/useAuth";
-import { CheckCircle } from "lucide-react";
+import { CheckCircle, Loader2 } from "lucide-react";
 
 type AuthView = "login" | "register" | "recovery" | "success";
 
@@ -17,24 +17,48 @@ export default function AuthPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [agreed, setAgreed] = useState(false);
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  const { login, register } = useAuth();
+  const { signIn, signUp } = useAuth();
   const router = useRouter();
 
-  const handleLogin = () => {
+  function tr(msg: string): string {
+    const map: Record<string, string> = {
+      "Invalid login credentials": "Неверный email или пароль",
+      "email rate limit exceeded": "Слишком много попыток. Подождите пару минут.",
+      "User already registered": "Этот email уже зарегистрирован. Попробуйте войти.",
+      "Email not confirmed": "Email не подтверждён. Проверьте почту.",
+    };
+    for (const [k, v] of Object.entries(map)) {
+      if (msg.toLowerCase().includes(k.toLowerCase())) return v;
+    }
+    return msg;
+  }
+
+  const handleLogin = async () => {
     setError("");
     if (!email || !password) {
       setError("Заполните все поля");
       return;
     }
-    login(email, password);
+    setSubmitting(true);
+    const err = await signIn(email, password);
+    setSubmitting(false);
+    if (err) {
+      setError(tr(err));
+      return;
+    }
     router.push("/");
   };
 
-  const handleRegister = () => {
+  const handleRegister = async () => {
     setError("");
     if (!name || !email || !password || !confirmPassword) {
       setError("Заполните все поля");
+      return;
+    }
+    if (password.length < 6) {
+      setError("Пароль должен быть не менее 6 символов");
       return;
     }
     if (password !== confirmPassword) {
@@ -45,13 +69,16 @@ export default function AuthPage() {
       setError("Примите пользовательское соглашение");
       return;
     }
-    register(name, email, password);
-    setView("success");
-  };
-
-  const handleRecovery = () => {
-    if (!email) {
-      setError("Введите email");
+    setSubmitting(true);
+    const err = await signUp(email, password, name);
+    setSubmitting(false);
+    if (err) {
+      if (err.toLowerCase().includes("already registered")) {
+        setError("Этот email уже зарегистрирован.");
+        setView("login");
+      } else {
+        setError(tr(err));
+      }
       return;
     }
     setView("success");
@@ -73,7 +100,7 @@ export default function AuthPage() {
           <CheckCircle className="h-16 w-16 text-green-500 mx-auto mb-4" />
           <h2 className="text-2xl font-bold mb-2">Успешно!</h2>
           <p className="text-muted-foreground mb-6">
-            {view === "success" && "Всё готово. Добро пожаловать!"}
+            Аккаунт создан. Добро пожаловать!
           </p>
           <Button
             onClick={() => router.push("/")}
@@ -89,7 +116,6 @@ export default function AuthPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-background">
       <div className="w-full max-w-md p-8">
-        {/* Logo */}
         <div className="text-center mb-8">
           <div className="flex justify-center mb-6">
             <img src="/logo.svg" alt="навылет!" className="h-10" />
@@ -131,9 +157,7 @@ export default function AuthPage() {
 
           {view !== "recovery" && (
             <div>
-              <label className="text-sm font-medium mb-1.5 block">
-                Пароль
-              </label>
+              <label className="text-sm font-medium mb-1.5 block">Пароль</label>
               <Input
                 type="password"
                 value={password}
@@ -167,13 +191,9 @@ export default function AuthPage() {
               />
               <span className="text-muted-foreground">
                 Я согласен с{" "}
-                <span className="text-brand underline">
-                  пользовательским соглашением
-                </span>{" "}
-                и{" "}
-                <span className="text-brand underline">
-                  политикой конфиденциальности
-                </span>
+                <span className="text-brand underline">пользовательским соглашением</span>
+                {" "}и{" "}
+                <span className="text-brand underline">политикой конфиденциальности</span>
               </span>
             </label>
           )}
@@ -184,25 +204,28 @@ export default function AuthPage() {
                 ? handleLogin
                 : view === "register"
                   ? handleRegister
-                  : handleRecovery
+                  : () => {}
             }
+            disabled={submitting}
             className="w-full bg-foreground text-background hover:bg-foreground/90"
           >
-            {view === "login" && "Войти"}
-            {view === "register" && "Зарегистрироваться"}
-            {view === "recovery" && "Отправить ссылку"}
+            {submitting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : view === "login" ? (
+              "Войти"
+            ) : view === "register" ? (
+              "Зарегистрироваться"
+            ) : (
+              "Отправить ссылку"
+            )}
           </Button>
         </div>
 
-        {/* Footer links */}
         <div className="mt-6 text-center text-sm text-muted-foreground space-y-2">
           {view === "login" && (
             <>
               <button
-                onClick={() => {
-                  resetForm();
-                  setView("recovery");
-                }}
+                onClick={() => { resetForm(); setView("recovery"); }}
                 className="text-brand hover:underline block mx-auto"
               >
                 Забыли пароль?
@@ -210,10 +233,7 @@ export default function AuthPage() {
               <p>
                 Нет аккаунта?{" "}
                 <button
-                  onClick={() => {
-                    resetForm();
-                    setView("register");
-                  }}
+                  onClick={() => { resetForm(); setView("register"); }}
                   className="text-brand hover:underline"
                 >
                   Зарегистрироваться
@@ -225,10 +245,7 @@ export default function AuthPage() {
             <p>
               Уже есть аккаунт?{" "}
               <button
-                onClick={() => {
-                  resetForm();
-                  setView("login");
-                }}
+                onClick={() => { resetForm(); setView("login"); }}
                 className="text-brand hover:underline"
               >
                 Войти
@@ -237,10 +254,7 @@ export default function AuthPage() {
           )}
           {view === "recovery" && (
             <button
-              onClick={() => {
-                resetForm();
-                setView("login");
-              }}
+              onClick={() => { resetForm(); setView("login"); }}
               className="text-brand hover:underline"
             >
               Вернуться ко входу

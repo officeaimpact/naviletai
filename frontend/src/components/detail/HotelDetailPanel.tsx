@@ -11,7 +11,7 @@ import {
   Waves, Baby, Bed, Utensils, Dumbbell, MapPin, Building2,
   Phone, Globe, Ruler, Calendar, Sparkles, Wifi, CreditCard,
   TreePalm, UtensilsCrossed, Music, Navigation, Plane,
-  Luggage, Clock, ArrowRight,
+  Luggage, Clock, ArrowRight, ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
@@ -269,13 +269,21 @@ export function HotelDetailPanel({
         <div className="flex items-center justify-between px-5 py-3">
           <h3 className="text-sm font-semibold truncate pr-4">{card.hotel_name}</h3>
           <div className="flex items-center gap-1 shrink-0">
-            <button onClick={() => onFavorite?.(card)} className="p-2 hover:bg-muted rounded-lg transition-colors">
+            <button onClick={() => onFavorite?.(card)} className="p-2.5 hover:bg-muted rounded-lg transition-colors">
               <Heart className={cn("h-4 w-4 transition-all", isFavorited ? "fill-red-500 text-red-500" : "text-muted-foreground")} />
             </button>
-            <button className="p-2 hover:bg-muted rounded-lg transition-colors">
+            <button
+              onClick={() => {
+                if (card.hotel_link) {
+                  navigator.clipboard.writeText(card.hotel_link).catch(() => {});
+                }
+              }}
+              className="p-2.5 hover:bg-muted rounded-lg transition-colors"
+              title="Скопировать ссылку"
+            >
               <Share2 className="h-4 w-4 text-muted-foreground" />
             </button>
-            <button onClick={onClose} className="p-2 hover:bg-muted rounded-lg transition-colors">
+            <button onClick={onClose} className="p-2.5 hover:bg-muted rounded-lg transition-colors">
               <X className="h-4 w-4 text-muted-foreground" />
             </button>
           </div>
@@ -309,7 +317,7 @@ export function HotelDetailPanel({
       </div>
 
       {/* ── Scrollable content ── */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div className="flex-1 overflow-y-auto overscroll-contain min-h-0">
         {tab === "hotel" ? (
           /* ═══════════ HOTEL TAB ═══════════ */
           <div className="p-5 space-y-5">
@@ -396,18 +404,29 @@ export function HotelDetailPanel({
             )}
 
             {/* Booking card */}
-            <div className="rounded-xl border border-brand/20 bg-brand/[0.03] p-4">
-              <div className="flex items-start justify-between gap-3">
+            <div className="rounded-xl border border-brand/20 bg-brand/[0.03] p-4 space-y-3">
+              <div className="flex flex-col sm:flex-row items-start sm:justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-sm font-semibold text-brand truncate">{card.operator}</p>
-                  <p className="text-2xl font-bold mt-0.5">от {formatPrice(card.price)}</p>
-                  <p className="text-xs text-muted-foreground">{card.nights} ночей · напрямую у {card.operator}</p>
+                  <p className="text-2xl font-bold">от {formatPrice(card.price)}</p>
+                  <p className="text-xs text-muted-foreground">{card.nights} ночей</p>
                 </div>
-                <Button className="bg-brand hover:bg-brand-dark text-white font-semibold px-5 shrink-0" asChild>
-                  <a href={card.hotel_link} target="_blank" rel="noopener noreferrer">
-                    Забронировать<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
-                  </a>
-                </Button>
+                {card.hotel_link ? (
+                  <Button className="bg-brand hover:bg-brand-dark text-white font-semibold px-5 shrink-0 w-full sm:w-auto" asChild>
+                    <a href={card.hotel_link} target="_blank" rel="noopener noreferrer">
+                      Забронировать на mgp.ru<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
+                    </a>
+                  </Button>
+                ) : (
+                  <Button className="bg-muted text-muted-foreground font-semibold px-5 shrink-0" disabled>
+                    Недоступно
+                  </Button>
+                )}
+              </div>
+              <div className="flex items-center gap-2 pt-2 border-t border-border/30">
+                <ShieldCheck className="h-3.5 w-3.5 text-brand shrink-0" />
+                <p className="text-[11px] text-muted-foreground leading-tight">
+                  Оформление тура на сайте «Магазин Горящих Путёвок». 27 лет на рынке · 200+ офисов по России
+                </p>
               </div>
             </div>
 
@@ -700,19 +719,29 @@ export function HotelDetailPanel({
                   </div>
 
                   {/* Booking CTA */}
-                  <div className="rounded-xl border border-brand/20 bg-brand/[0.03] p-4">
+                  <div className="rounded-xl border border-brand/20 bg-brand/[0.03] p-4 space-y-3">
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <p className="text-xl font-bold">от {formatPrice(selected.price || card.price)}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {card.nights} ночей · {selected.forward[0]?.airline || card.operator}
-                        </p>
+                        <p className="text-xs text-muted-foreground">{card.nights} ночей</p>
                       </div>
-                      <Button className="bg-brand hover:bg-brand-dark text-white font-semibold px-5 shrink-0" asChild>
-                        <a href={card.hotel_link} target="_blank" rel="noopener noreferrer">
-                          Забронировать<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
-                        </a>
-                      </Button>
+                      {card.hotel_link ? (
+                        <Button className="bg-brand hover:bg-brand-dark text-white font-semibold px-5 shrink-0" asChild>
+                          <a href={card.hotel_link} target="_blank" rel="noopener noreferrer">
+                            Забронировать на mgp.ru<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
+                          </a>
+                        </Button>
+                      ) : (
+                        <Button className="bg-muted text-muted-foreground font-semibold px-5 shrink-0" disabled>
+                          Недоступно
+                        </Button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 pt-2 border-t border-border/30">
+                      <ShieldCheck className="h-3.5 w-3.5 text-brand shrink-0" />
+                      <p className="text-[11px] text-muted-foreground leading-tight">
+                        Оформление тура на сайте «Магазин Горящих Путёвок». 27 лет на рынке · 200+ офисов по России
+                      </p>
                     </div>
                   </div>
                 </>
