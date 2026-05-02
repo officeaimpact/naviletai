@@ -17,11 +17,11 @@ import {
   Heart,
   Info,
   Handshake,
-  MessageSquare,
   LogOut,
   User,
   ChevronRight,
 } from "lucide-react";
+import { BrandLogo } from "@/components/brand/BrandLogo";
 import { ChatSession } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
@@ -68,8 +68,12 @@ export function MobileNav({
           <div className="flex flex-col h-full">
             {/* Logo */}
             <div className="p-4">
-              <button onClick={onLogoClick} className="cursor-pointer hover:opacity-80 transition-opacity">
-                <img src="/logo.svg" alt="навылет!" className="h-8" />
+              <button
+                onClick={onLogoClick}
+                className="cursor-pointer transition-opacity hover:opacity-80"
+                aria-label="На главную"
+              >
+                <BrandLogo className="h-8" priority />
               </button>
             </div>
 
@@ -158,8 +162,12 @@ export function MobileNav({
         </SheetContent>
       </Sheet>
 
-      <button onClick={onLogoClick} className="cursor-pointer hover:opacity-80 transition-opacity">
-        <img src="/logo.svg" alt="навылет!" className="h-6" />
+      <button
+        onClick={onLogoClick}
+        className="cursor-pointer transition-opacity hover:opacity-80"
+        aria-label="На главную"
+      >
+        <BrandLogo className="h-6" priority />
       </button>
 
       <Button

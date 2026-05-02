@@ -18,6 +18,7 @@ import {
   User,
   Ellipsis,
 } from "lucide-react";
+import { BrandLogo } from "@/components/brand/BrandLogo";
 import { ChatSession } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
@@ -72,8 +73,12 @@ export function Sidebar({
       {/* Logo & Collapse */}
       <div className="flex items-center justify-between p-4">
         {!isCollapsed && (
-          <button onClick={onLogoClick} className="cursor-pointer hover:opacity-80 transition-opacity">
-            <img src="/logo.svg" alt="навылет!" className="h-8" />
+          <button
+            onClick={onLogoClick}
+            className="cursor-pointer transition-opacity hover:opacity-80"
+            aria-label="На главную"
+          >
+            <BrandLogo className="h-8" priority />
           </button>
         )}
         <Button

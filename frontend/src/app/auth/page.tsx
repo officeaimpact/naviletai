@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { BrandLogo } from "@/components/brand/BrandLogo";
 import { useAuth } from "@/hooks/useAuth";
 import { CheckCircle, Loader2 } from "lucide-react";
 
@@ -118,7 +119,7 @@ export default function AuthPage() {
       <div className="w-full max-w-md p-8">
         <div className="text-center mb-8">
           <div className="flex justify-center mb-6">
-            <img src="/logo.svg" alt="навылет!" className="h-10" />
+            <BrandLogo className="h-11" priority />
           </div>
           <h1 className="text-2xl font-bold">
             {view === "login" && "Войти"}
