@@ -35,7 +35,6 @@ interface MobileNavProps {
   onAboutClick?: () => void;
   onPartnersClick?: () => void;
   onLogoClick: () => void;
-  onAuthClick?: () => void;
   isFavoritesActive?: boolean;
   isAboutActive?: boolean;
   isPartnersActive?: boolean;
@@ -50,7 +49,6 @@ export function MobileNav({
   onAboutClick,
   onPartnersClick,
   onLogoClick,
-  onAuthClick,
   isFavoritesActive = false,
   isAboutActive = false,
   isPartnersActive = false,
@@ -157,7 +155,11 @@ export function MobileNav({
               ))}
             </ScrollArea>
 
-            <MobileNavFooter onAuthClick={onAuthClick} />
+            <div className="border-t border-border px-3 py-3 mt-auto">
+              <p className="text-[10px] text-muted-foreground/40 text-center leading-tight">
+                Данные предоставлены «Магазин Горящих Путёвок»
+              </p>
+            </div>
           </div>
         </SheetContent>
       </Sheet>
@@ -181,6 +183,8 @@ export function MobileNav({
   );
 }
 
+// Auth removed for B2B agent build. Helper kept here for easy rollback later.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function MobileNavFooter({ onAuthClick }: { onAuthClick?: () => void }) {
   const { user, signOut } = useAuth();
   const [showMenu, setShowMenu] = useState(false);

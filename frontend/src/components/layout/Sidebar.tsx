@@ -19,6 +19,7 @@ import {
   Ellipsis,
 } from "lucide-react";
 import { BrandLogo } from "@/components/brand/BrandLogo";
+import { StatusChip } from "@/components/chat/StatusChip";
 import { ChatSession } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
@@ -32,7 +33,6 @@ interface SidebarProps {
   onAboutClick?: () => void;
   onPartnersClick?: () => void;
   onLogoClick: () => void;
-  onAuthClick?: () => void;
   isFavoritesActive?: boolean;
   isAboutActive?: boolean;
   isPartnersActive?: boolean;
@@ -49,7 +49,6 @@ export function Sidebar({
   onAboutClick,
   onPartnersClick,
   onLogoClick,
-  onAuthClick,
   isFavoritesActive = false,
   isAboutActive = false,
   isPartnersActive = false,
@@ -73,13 +72,16 @@ export function Sidebar({
       {/* Logo & Collapse */}
       <div className="flex items-center justify-between p-4">
         {!isCollapsed && (
-          <button
-            onClick={onLogoClick}
-            className="cursor-pointer transition-opacity hover:opacity-80"
-            aria-label="На главную"
-          >
-            <BrandLogo className="h-8" priority />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onLogoClick}
+              className="cursor-pointer transition-opacity hover:opacity-80"
+              aria-label="На главную"
+            >
+              <BrandLogo className="h-8" priority />
+            </button>
+            <StatusChip />
+          </div>
         )}
         <Button
           variant="ghost"
@@ -192,12 +194,18 @@ export function Sidebar({
         </div>
       </ScrollArea>
 
-      {/* Profile footer */}
-      <SidebarFooter isCollapsed={isCollapsed} onAuthClick={onAuthClick} />
+      {/* Footer attribution (auth removed for B2B agent build) */}
+      <div className="border-t border-sidebar-border px-3 py-3">
+        <p className="text-[10px] text-muted-foreground/40 text-center leading-tight">
+          {isCollapsed ? "MGP" : "Данные предоставлены «Магазин Горящих Путёвок»"}
+        </p>
+      </div>
     </aside>
   );
 }
 
+// Auth removed for B2B agent build. Helper kept here for easy rollback later.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function SidebarFooter({
   isCollapsed,
   onAuthClick,

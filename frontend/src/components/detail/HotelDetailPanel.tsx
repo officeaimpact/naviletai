@@ -11,11 +11,12 @@ import {
   Waves, Baby, Bed, Utensils, Dumbbell, MapPin, Building2,
   Phone, Globe, Ruler, Calendar, Sparkles, Wifi, CreditCard,
   TreePalm, UtensilsCrossed, Music, Navigation, Plane,
-  Luggage, Clock, ArrowRight, ShieldCheck,
+  Luggage, Clock, ArrowRight, ShieldCheck, RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 import { HotelMap } from "@/components/map/HotelMap";
+import { actualizeTourFull } from "@/lib/api/copilot";
 
 interface HotelDetailPanelProps {
   card: TourCard;
@@ -202,6 +203,53 @@ export function HotelDetailPanel({
   const [selectedFlightIdx, setSelectedFlightIdx] = useState(0);
   const [descExpanded, setDescExpanded] = useState(false);
   const [reviewsOpen, setReviewsOpen] = useState(false);
+  const [actualizing, setActualizing] = useState(false);
+  const [actualizeMsg, setActualizeMsg] = useState<{
+    tone: "ok" | "warn" | "error";
+    text: string;
+  } | null>(null);
+
+  const handleActualize = useCallback(async () => {
+    if (!card.tour_id) return;
+    setActualizing(true);
+    setActualizeMsg(null);
+    try {
+      const data = await actualizeTourFull(card.tour_id);
+      const currency = data.currency || "RUB";
+      const fmt = (n?: number | null) =>
+        typeof n === "number" && Number.isFinite(n)
+          ? `${n.toLocaleString("ru-RU")} ${currency === "RUB" ? "₽" : currency}`
+          : "—";
+      if (typeof data.actual_price === "number") {
+        let suffix = "";
+        if (typeof data.delta === "number") {
+          if (data.delta > 0) suffix = ` (выросла на ${fmt(Math.abs(data.delta))})`;
+          else if (data.delta < 0) suffix = ` (упала на ${fmt(Math.abs(data.delta))})`;
+          else if (data.delta === 0) suffix = " (без изменений)";
+        }
+        setActualizeMsg({
+          tone: "ok",
+          text: `Актуальная цена: ${fmt(data.actual_price)}${suffix}.`,
+        });
+      } else {
+        setActualizeMsg({
+          tone: "warn",
+          text: data.message || "Не удалось получить актуальную цену.",
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "error";
+      setActualizeMsg({
+        tone: "error",
+        text:
+          msg === "expired"
+            ? "Данные тура устарели — нужен новый поиск."
+            : "Не удалось актуализировать. Попробуйте через минуту.",
+      });
+    } finally {
+      setActualizing(false);
+    }
+  }, [card.tour_id]);
 
   useEffect(() => {
     if (card.hotel_code == null) { setLoading(false); return; }
@@ -405,6 +453,16 @@ export function HotelDetailPanel({
 
             {/* Booking card */}
             <div className="rounded-xl border border-brand/20 bg-brand/[0.03] p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-1 rounded-full bg-brand text-white text-[10px] font-semibold px-2 py-0.5 uppercase tracking-wide">
+                  <Sparkles className="h-3 w-3" /> AI рекомендация
+                </span>
+                {card.selected_flight ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-medium px-2 py-0.5">
+                    <Plane className="h-3 w-3" /> рейс зафиксирован
+                  </span>
+                ) : null}
+              </div>
               <div className="flex flex-col sm:flex-row items-start sm:justify-between gap-3">
                 <div className="min-w-0">
                   <p className="text-2xl font-bold">от {formatPrice(card.price)}</p>
@@ -413,7 +471,7 @@ export function HotelDetailPanel({
                 {card.hotel_link ? (
                   <Button className="bg-brand hover:bg-brand-dark text-white font-semibold px-5 shrink-0 w-full sm:w-auto" asChild>
                     <a href={card.hotel_link} target="_blank" rel="noopener noreferrer">
-                      Забронировать на mgp.ru<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
+                      Открыть на mgp.ru<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
                     </a>
                   </Button>
                 ) : (
@@ -422,6 +480,27 @@ export function HotelDetailPanel({
                   </Button>
                 )}
               </div>
+              <button
+                type="button"
+                onClick={handleActualize}
+                disabled={actualizing}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-700 text-sm font-semibold px-3 py-2 transition hover:border-emerald-300 hover:bg-emerald-100 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                <RefreshCw className={cn("h-4 w-4", actualizing && "animate-spin")} />
+                {actualizing ? "Актуализирую..." : "Актуализировать цену"}
+              </button>
+              {actualizeMsg ? (
+                <p
+                  className={cn(
+                    "text-xs leading-snug",
+                    actualizeMsg.tone === "ok" && "text-emerald-700",
+                    actualizeMsg.tone === "warn" && "text-amber-700",
+                    actualizeMsg.tone === "error" && "text-rose-600"
+                  )}
+                >
+                  {actualizeMsg.text}
+                </p>
+              ) : null}
               <div className="flex items-center gap-2 pt-2 border-t border-border/30">
                 <ShieldCheck className="h-3.5 w-3.5 text-brand shrink-0" />
                 <p className="text-[11px] text-muted-foreground leading-tight">

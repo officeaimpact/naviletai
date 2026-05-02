@@ -4,11 +4,22 @@ import { InputBar } from "./InputBar";
 import { motion } from "framer-motion";
 
 const SUGGESTIONS = [
-  { emoji: "🇹🇷", text: "Турция, всё включено, на неделю" },
-  { emoji: "🔥", text: "Горящие туры из Москвы" },
-  { emoji: "🏖", text: "Египет, 5 звёзд, в марте" },
-  { emoji: "🌴", text: "Шри-Ланка вдвоём из Москвы" },
-  { emoji: "🏔", text: "Сочи без перелёта на выходные" },
+  {
+    emoji: "👨‍👩‍👧",
+    text: "Семья 2+1, ребёнку 6, Турция из Москвы в начале июня, 4-5★, всё включено, до 300к",
+  },
+  {
+    emoji: "🏖",
+    text: "Из Москвы в Египет, 7 ночей, конец октября, 4-5★ на первой линии, всё включено, до 200 000 ₽ за двоих",
+  },
+  {
+    emoji: "🔥",
+    text: "Горящие туры из Москвы — что есть прямо сейчас",
+  },
+  {
+    emoji: "📋",
+    text: "Вот переписка с клиентом — собери короткое ТЗ по шаблону, не запускай поиск",
+  },
 ];
 
 interface WelcomeScreenProps {
@@ -26,12 +37,12 @@ export function WelcomeScreen({ onSend, isLoading }: WelcomeScreenProps) {
         className="text-center mb-10"
       >
         <h1 className="text-3xl md:text-4xl font-bold tracking-tight leading-snug">
-          Привет, я помогу тебе подобрать
+          Привет, я помогу подобрать
           <br className="hidden sm:inline" />
-          {" "}идеальное путешествие
+          {" "}твоему клиенту лучшее путешествие
         </h1>
         <p className="text-sm text-muted-foreground mt-3">
-          Подбираю туры из предложений 100+ туроператоров
+          Свободный диалог по запросу клиента · 100+ туроператоров TourVisor · подборка для отправки клиенту
         </p>
       </motion.div>
 

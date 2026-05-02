@@ -1,9 +1,9 @@
 "use client";
 
-import { TourCard as TourCardType } from "@/lib/types";
+import { TourCard as TourCardType, CardFlag, CardFlagSeverity } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Heart, Star } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Heart, Plane, Star } from "lucide-react";
 import {
   formatPrice,
   formatPricePerNight,
@@ -14,6 +14,18 @@ import {
 import { fixImageUrl } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
+
+const FLAG_BADGE_STYLES: Record<CardFlagSeverity, string> = {
+  info: "bg-slate-100 text-slate-600 border border-slate-200",
+  warning: "bg-amber-50 text-amber-700 border border-amber-200",
+  risk: "bg-rose-50 text-rose-700 border border-rose-200",
+};
+
+const FLAG_PRIORITY: Record<CardFlagSeverity, number> = {
+  risk: 0,
+  warning: 1,
+  info: 2,
+};
 
 interface TourCardProps {
   card: TourCardType;
@@ -33,6 +45,14 @@ export function TourCardComponent({
   const priceLabel = card.price_per_person ? "за человека" : "";
   const imgSrc = fixImageUrl(card.image_url);
   const [imgError, setImgError] = useState(false);
+  const flags: CardFlag[] = Array.isArray(card.flags) ? card.flags : [];
+  const sortedFlags = [...flags].sort(
+    (a, b) => FLAG_PRIORITY[a.severity] - FLAG_PRIORITY[b.severity]
+  );
+  const flagsForBadges = sortedFlags.slice(0, 3);
+  const seriousFlags = sortedFlags.filter(
+    (f) => f.severity === "warning" || f.severity === "risk"
+  );
 
   return (
     <div
@@ -127,6 +147,21 @@ export function TourCardComponent({
               {hotelStatus}
             </Badge>
           )}
+          {flagsForBadges.map((flag) => (
+            <span
+              key={`${flag.type}-${flag.label}`}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium leading-none",
+                FLAG_BADGE_STYLES[flag.severity]
+              )}
+              title={flag.label}
+            >
+              {flag.severity !== "info" && (
+                <AlertTriangle className="h-2.5 w-2.5" />
+              )}
+              {flag.label}
+            </span>
+          ))}
         </div>
 
         {/* Price & Actions */}
@@ -175,6 +210,27 @@ export function TourCardComponent({
             </Button>
           </div>
         </div>
+
+        {seriousFlags.length > 0 && (
+          <div className="mt-2 rounded-lg border border-amber-100 bg-amber-50/60 px-2.5 py-1.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+              На что обратить внимание
+            </p>
+            <p className="mt-0.5 text-[11px] leading-snug text-amber-800">
+              {seriousFlags.slice(0, 3).map((f) => f.label).join(" · ")}
+            </p>
+          </div>
+        )}
+
+        {card.selected_flight && (
+          <div className="mt-2 flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[11px] font-medium text-emerald-700">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            <Plane className="h-3 w-3" />
+            <span className="truncate">
+              {card.flight_summary || "Конфигурация перелёта зафиксирована"}
+            </span>
+          </div>
+        )}
 
         {card._warning && (
           <p className="text-xs text-amber-600 mt-2">{card._warning}</p>

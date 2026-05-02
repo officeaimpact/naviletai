@@ -225,12 +225,18 @@ export function useChat() {
           currentSessions = [newSession, ...sessions];
         }
 
+        const responseCards = response.tour_cards ?? [];
+        const cascadePhase =
+          !!response.cascade_missing || response.turn_intent === "cascade_block";
         const assistantMsg: ChatMessage = {
           id: generateId(),
           role: "assistant",
           content: response.reply,
-          tour_cards: response.tour_cards.length > 0 ? response.tour_cards : undefined,
+          tour_cards: responseCards.length > 0 ? responseCards : undefined,
           timestamp: Date.now(),
+          cascade_missing: response.cascade_missing ?? null,
+          slots: cascadePhase ? response.slots_collected ?? null : null,
+          cascade_phase: cascadePhase,
         };
 
         const finalMessages = [...newMessages, assistantMsg];

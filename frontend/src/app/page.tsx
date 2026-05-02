@@ -1,24 +1,67 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback } from "react";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { MobileNav } from "@/components/layout/MobileNav";
 import { WelcomeScreen } from "@/components/chat/WelcomeScreen";
 import { MessageList } from "@/components/chat/MessageList";
-import { InputBar } from "@/components/chat/InputBar";
+import { InputBar, type QuickAction } from "@/components/chat/InputBar";
 import { HotelDetailPanel } from "@/components/detail/HotelDetailPanel";
 import { PhotoGallery } from "@/components/detail/PhotoGallery";
 import { HotelMap } from "@/components/map/HotelMap";
 import { FavoritesView } from "@/components/favorites/FavoritesView";
 import { AboutView } from "@/components/about/AboutView";
 import { PartnersView } from "@/components/partners/PartnersView";
-import { AuthGateModal } from "@/components/auth/AuthGateModal";
 import { useChat } from "@/hooks/useChat";
-import { useAuth } from "@/hooks/useAuth";
 import { useFavorites } from "@/hooks/useFavorites";
 import { TourCard } from "@/lib/types";
 import { AnimatePresence, motion } from "framer-motion";
 import { X, Map } from "lucide-react";
+
+const QUICK_ACTIONS_WITH_RESULTS: QuickAction[] = [
+  {
+    label: "Лучший для клиента",
+    prompt:
+      "Из текущей выдачи выбери лучший вариант под профиль моего клиента. Дай 1 альтернативу и 1, который не рекомендую — кратко по фактам.",
+  },
+  {
+    label: "ТОП-3 для подборки",
+    prompt:
+      "Собери из текущей выдачи 3 варианта: бюджетный, оптимальный, апсейл. Кратко поясни каждый, без аббревиатур.",
+  },
+  {
+    label: "Сравни 1 и 2",
+    prompt:
+      "Сравни первый и второй отель из текущей выдачи: пляж, питание, рейтинг, цена. Кому какой подойдёт.",
+  },
+  {
+    label: "Возражение «дорого»",
+    prompt:
+      "Клиент говорит «дорого». Дай 2-3 короткие фразы и предложи альтернативу из текущей выдачи.",
+  },
+  {
+    label: "Альтернатива в этой цене",
+    prompt:
+      "Покажи 2 альтернативы в том же бюджете из текущей выдачи и поясни отличия одной строкой.",
+  },
+  {
+    label: "Что входит в первый",
+    prompt:
+      "Что входит в цену первого тура из выдачи: рейсы, багаж, доплаты, что не включено.",
+  },
+];
+
+const QUICK_ACTIONS_WITHOUT_RESULTS: QuickAction[] = [
+  {
+    label: "ТЗ из переписки",
+    prompt:
+      "Вот переписка с клиентом — собери короткое ТЗ по шаблону: клиент / направление / даты / важно / бюджет. Не запускай поиск, только выжимка.",
+  },
+  {
+    label: "Горящие туры",
+    prompt: "Покажи горящие туры из Москвы — что есть прямо сейчас.",
+  },
+];
 
 export default function Home() {
   const {
@@ -32,59 +75,17 @@ export default function Home() {
   } = useChat();
 
   const { toggleFavorite, isFavorited, favoritedIds } = useFavorites();
-  const { user } = useAuth();
 
   const [view, setView] = useState<"chat" | "favorites" | "about" | "partners">("chat");
   const [selectedCard, setSelectedCard] = useState<TourCard | null>(null);
   const [galleryImages, setGalleryImages] = useState<string[] | null>(null);
   const [galleryStart, setGalleryStart] = useState(0);
   const [mapCards, setMapCards] = useState<TourCard[] | null>(null);
-  const [showAuthGate, setShowAuthGate] = useState(false);
-  const pendingMessageRef = useRef<string | null>(null);
   const hasMessages = messages.length > 0;
   const hasReceivedCards = messages.some((m) => m.tour_cards && m.tour_cards.length > 0);
-
-  const PENDING_MSG_KEY = "navylet_pending_msg";
-
-  const gatedSend = useCallback(
-    (text: string) => {
-      if (hasReceivedCards && !user) {
-        pendingMessageRef.current = text;
-        try { sessionStorage.setItem(PENDING_MSG_KEY, text); } catch {}
-        setShowAuthGate(true);
-        return;
-      }
-      send(text);
-    },
-    [hasReceivedCards, user, send]
-  );
-
-  useEffect(() => {
-    if (!user) return;
-    try {
-      const saved = sessionStorage.getItem(PENDING_MSG_KEY);
-      if (saved) {
-        sessionStorage.removeItem(PENDING_MSG_KEY);
-        setTimeout(() => send(saved), 500);
-      }
-    } catch {}
-  }, [user, send]);
-
-  const handleAuthSuccess = useCallback(() => {
-    setShowAuthGate(false);
-    const msg = pendingMessageRef.current;
-    pendingMessageRef.current = null;
-    try { sessionStorage.removeItem(PENDING_MSG_KEY); } catch {}
-    if (msg) {
-      setTimeout(() => send(msg), 400);
-    }
-  }, [send]);
-
-  const handleAuthClose = useCallback(() => {
-    setShowAuthGate(false);
-    pendingMessageRef.current = null;
-    try { sessionStorage.removeItem(PENDING_MSG_KEY); } catch {}
-  }, []);
+  const quickActions = hasReceivedCards
+    ? QUICK_ACTIONS_WITH_RESULTS
+    : QUICK_ACTIONS_WITHOUT_RESULTS;
 
   const openGallery = useCallback((images: string[], startIndex: number) => {
     setGalleryImages(images);
@@ -123,10 +124,6 @@ export default function Home() {
     setSelectedCard(null);
   }, []);
 
-  const handleAuthClick = useCallback(() => {
-    setShowAuthGate(true);
-  }, []);
-
   const handleNewChat = useCallback(() => {
     setView("chat");
     setSelectedCard(null);
@@ -152,7 +149,6 @@ export default function Home() {
           onAboutClick={handleAboutClick}
           onPartnersClick={handlePartnersClick}
           onLogoClick={handleLogoClick}
-          onAuthClick={handleAuthClick}
           isFavoritesActive={view === "favorites"}
           isAboutActive={view === "about"}
           isPartnersActive={view === "partners"}
@@ -170,7 +166,6 @@ export default function Home() {
           onAboutClick={handleAboutClick}
           onPartnersClick={handlePartnersClick}
           onLogoClick={handleLogoClick}
-          onAuthClick={handleAuthClick}
           isFavoritesActive={view === "favorites"}
           isAboutActive={view === "about"}
           isPartnersActive={view === "partners"}
@@ -200,13 +195,14 @@ export default function Home() {
                   onShowMap={openMap}
                 />
                 <InputBar
-                  onSend={gatedSend}
+                  onSend={send}
                   isLoading={isLoading}
-                  placeholder="Найди"
+                  placeholder="Опиши запрос клиента, попроси сравнение или подборку…"
+                  quickActions={quickActions}
                 />
               </>
             ) : (
-              <WelcomeScreen onSend={gatedSend} isLoading={isLoading} />
+              <WelcomeScreen onSend={send} isLoading={isLoading} />
             )}
           </div>
 
@@ -317,11 +313,6 @@ export default function Home() {
         )}
       </AnimatePresence>
 
-      <AuthGateModal
-        open={showAuthGate}
-        onClose={handleAuthClose}
-        onSuccess={handleAuthSuccess}
-      />
     </div>
   );
 }

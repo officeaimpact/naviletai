@@ -4,9 +4,118 @@ import { useEffect, useRef, useState } from "react";
 import { ChatMessage, TourCard } from "@/lib/types";
 import { TourCardComponent } from "@/components/cards/TourCard";
 import { cn } from "@/lib/utils";
-import { MapPin } from "lucide-react";
+import { AlertTriangle, Check, Copy, MapPin, Share2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
+import { createCollection } from "@/lib/api/copilot";
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fallback below */
+  }
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function CopyMessageButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        const ok = await copyToClipboard(text);
+        if (ok) {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1600);
+        }
+      }}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition",
+        copied
+          ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+          : "border-border bg-background text-muted-foreground hover:border-brand/40 hover:text-brand"
+      )}
+      title={copied ? "Скопировано" : "Скопировать ответ"}
+    >
+      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      {copied ? "Скопировано" : "Копировать"}
+    </button>
+  );
+}
+
+function ShareCollectionButton({ cards }: { cards: TourCard[] }) {
+  const [state, setState] = useState<"idle" | "loading" | "ready" | "error">(
+    "idle"
+  );
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+
+  const handle = async () => {
+    if (state === "loading") return;
+    if (shareUrl && state === "ready") {
+      await copyToClipboard(shareUrl);
+      window.open(shareUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+    setState("loading");
+    try {
+      const body = await createCollection(cards);
+      setShareUrl(body.share_url);
+      setState("ready");
+      await copyToClipboard(body.share_url);
+      window.open(body.share_url, "_blank", "noopener,noreferrer");
+    } catch {
+      setState("error");
+      setTimeout(() => setState("idle"), 2400);
+    }
+  };
+
+  let label: string;
+  if (state === "loading") label = "Готовлю ссылку...";
+  else if (state === "ready") label = "Ссылка скопирована";
+  else if (state === "error") label = "Не получилось — повторите";
+  else label = `Поделиться подборкой (${cards.length})`;
+
+  return (
+    <button
+      type="button"
+      onClick={handle}
+      disabled={state === "loading"}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition disabled:opacity-60",
+        state === "ready"
+          ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+          : state === "error"
+          ? "border-rose-200 bg-rose-50 text-rose-700"
+          : "border-border bg-background text-muted-foreground hover:border-brand/40 hover:text-brand"
+      )}
+      title="Создать публичную HTML-подборку для клиента"
+    >
+      {state === "ready" ? (
+        <Check className="h-3 w-3" />
+      ) : (
+        <Share2 className="h-3 w-3" />
+      )}
+      {label}
+    </button>
+  );
+}
 
 interface MessageListProps {
   messages: ChatMessage[];
@@ -80,6 +189,11 @@ function MessageBubble({
 }) {
   const isUser = message.role === "user";
   const hasTourCards = message.tour_cards && message.tour_cards.length > 0;
+  const cascadePhase = !!message.cascade_phase;
+  const slotEntries =
+    message.slots && Object.keys(message.slots).length > 0
+      ? Object.entries(message.slots)
+      : [];
 
   return (
     <motion.div
@@ -93,13 +207,46 @@ function MessageBubble({
       >
         <div
           className={cn(
-            "max-w-[88%] sm:max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed",
-            isUser
-              ? "bg-brand text-white"
-              : "bg-muted/60 text-foreground border border-border/40"
+            "flex max-w-[88%] flex-col gap-1.5 sm:max-w-[75%]",
+            isUser ? "items-end" : "items-start"
           )}
         >
-          <p className="whitespace-pre-wrap">{message.content}</p>
+          <div
+            className={cn(
+              "rounded-2xl px-4 py-3 text-sm leading-relaxed",
+              isUser
+                ? "bg-brand text-white"
+                : "bg-muted/60 text-foreground border border-border/40"
+            )}
+          >
+            <p className="whitespace-pre-wrap">{message.content}</p>
+            {!isUser && message.cascade_missing ? (
+              <div className="mt-2 inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+                <AlertTriangle className="h-3 w-3" />
+                Жду параметр: {message.cascade_missing}
+              </div>
+            ) : null}
+            {!isUser && cascadePhase && slotEntries.length > 0 ? (
+              <div className="mt-2 flex flex-wrap gap-1 text-[11px] text-muted-foreground">
+                {slotEntries.map(([k, v]) => (
+                  <span
+                    key={k}
+                    className="rounded bg-background/80 px-1.5 py-0.5 border border-border/40"
+                  >
+                    {k}: {v}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          {!isUser && message.content ? (
+            <div className="ml-1 flex flex-wrap items-center gap-1.5">
+              <CopyMessageButton text={message.content} />
+              {hasTourCards ? (
+                <ShareCollectionButton cards={message.tour_cards!} />
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </div>
 

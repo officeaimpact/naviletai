@@ -4,11 +4,18 @@ import { useState, useRef, useEffect, KeyboardEvent } from "react";
 import { Send, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+export interface QuickAction {
+  label: string;
+  prompt: string;
+}
+
 interface InputBarProps {
   onSend: (message: string) => void;
   isLoading?: boolean;
   placeholder?: string;
   centered?: boolean;
+  /** Опциональный ряд готовых промптов над инпутом (агентские быстрые действия). */
+  quickActions?: QuickAction[];
 }
 
 export function InputBar({
@@ -16,6 +23,7 @@ export function InputBar({
   isLoading = false,
   placeholder = "Помоги мне найти билеты до Москвы",
   centered = false,
+  quickActions,
 }: InputBarProps) {
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -57,6 +65,25 @@ export function InputBar({
         centered ? "max-w-2xl mx-auto" : "max-w-3xl mx-auto"
       )}
     >
+      {quickActions && quickActions.length > 0 ? (
+        <div className="mb-2.5 flex flex-wrap gap-1.5">
+          {quickActions.map((qa) => (
+            <button
+              key={qa.label}
+              type="button"
+              disabled={isLoading}
+              onClick={() => {
+                if (isLoading) return;
+                onSend(qa.prompt);
+              }}
+              className="rounded-full border border-border bg-white px-3 py-1.5 text-[12px] font-medium text-muted-foreground transition hover:-translate-y-0.5 hover:border-brand/40 hover:bg-brand/5 hover:text-brand disabled:opacity-50"
+              title={qa.prompt}
+            >
+              {qa.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div
         className="relative flex items-center gap-2 rounded-full
                    border-2 border-transparent bg-white shadow-sm
