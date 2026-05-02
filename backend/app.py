@@ -2643,6 +2643,10 @@ async def _tool_build_collection(
     agent_note = (args.get("agent_note") or "").strip()
 
     cards_payload = [_share_card_payload(c) for c in selected_cards]
+    try:
+        await _enrich_share_cards_with_hotel_info(cards_payload, session=session)
+    except Exception:
+        logger.exception("build_collection enrichment failed (non-fatal)")
     _purge_expired_collections()
 
     collection_id = uuid.uuid4().hex[:12]
@@ -3401,7 +3405,130 @@ def _share_card_payload(card: Dict[str, Any]) -> Dict[str, Any]:
         "hotel_code": int(card.get("hotel_code") or 0),
         "flight_summary": flight_summary,
         "flight": flight_view,
+        # Поля ниже заполняются `_enrich_share_cards_with_hotel_info` после
+        # POST /api/collection — их использует модалка детального просмотра
+        # отеля на публичной странице /share/<id>.
+        "description": "",
+        "beach": "",
+        "child": "",
+        "services": "",
+        "mealtypes": "",
+        "rooms": "",
+        "images": [],
     }
+
+
+async def _enrich_share_cards_with_hotel_info(
+    cards: List[Dict[str, Any]],
+    *,
+    session: Optional[CopilotSession] = None,
+    timeout_sec: float = 12.0,
+) -> None:
+    """In-place обогащает payload-карточки описанием/фото/инфраструктурой
+    отеля, чтобы модалка детального просмотра на share-странице получила
+    полный контекст. Источники по приоритету:
+      1) `session.hotel_info_cache` — мгновенно;
+      2) живой `client.get_hotel_info` параллельно (asyncio.gather);
+      3) demo-каталог если TourVisor не подключён.
+    Любая ошибка по конкретному отелю приводит к пустым полям, но не валит
+    создание подборки целиком.
+    """
+    if not cards:
+        return
+
+    needs_fetch: List[Tuple[int, Dict[str, Any]]] = []
+    for card in cards:
+        code = int(card.get("hotel_code") or 0)
+        if not code:
+            continue
+        cached = (
+            session.hotel_info_cache.get(str(code))
+            if session and session.hotel_info_cache
+            else None
+        )
+        if cached and isinstance(cached.get("data"), dict):
+            _apply_hotel_info_to_share_card(card, cached["data"], from_cache=True)
+            continue
+        needs_fetch.append((code, card))
+
+    if not needs_fetch:
+        return
+
+    if not _has_tourvisor_credentials():
+        for code, card in needs_fetch:
+            for hotel in DEMO_HOTELS:
+                if hotel.get("hotel_code") == code:
+                    front = demo_hotel_to_info(hotel)
+                    _apply_hotel_info_to_share_card(card, front)
+                    break
+        return
+
+    client = TourVisorClient()
+    try:
+        async def _fetch_one(code: int) -> Tuple[int, Optional[Dict[str, Any]]]:
+            try:
+                hotel = await client.get_hotel_info(
+                    hotel_code=code,
+                    big_images=True,
+                    remove_tags=True,
+                    include_reviews=False,
+                )
+                return code, _hotel_info_to_frontend(hotel)
+            except Exception:
+                logger.exception("share enrichment failed for hotel %s", code)
+                return code, None
+
+        results = await asyncio.wait_for(
+            asyncio.gather(*[_fetch_one(code) for code, _ in needs_fetch]),
+            timeout=timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("share enrichment timed out after %.1fs", timeout_sec)
+        results = []
+    finally:
+        await client.close()
+
+    info_by_code = {code: data for code, data in results if data is not None}
+    for code, card in needs_fetch:
+        info = info_by_code.get(code)
+        if not info:
+            continue
+        _apply_hotel_info_to_share_card(card, info)
+
+
+def _apply_hotel_info_to_share_card(
+    card: Dict[str, Any], info: Dict[str, Any], *, from_cache: bool = False
+) -> None:
+    """Скопировать «человекочитаемые» поля из hotel_info в share-карточку."""
+    images = info.get("images") if isinstance(info, dict) else None
+    images_list = [_normalize_url(u) for u in (images or []) if u]
+    if from_cache and not images_list:
+        # Кэш _tool_get_hotel_info хранит только превью — оставим image_url.
+        first_image = info.get("first_image")
+        if first_image:
+            images_list = [_normalize_url(first_image)]
+
+    card["description"] = (info.get("description") or "")[:1200]
+    card["beach"] = (info.get("beach") or "")[:600]
+    card["child"] = (info.get("child") or "")[:600]
+    card["services"] = (
+        info.get("servicefree")
+        or info.get("services")
+        or ""
+    )[:600]
+    card["mealtypes"] = (
+        info.get("mealtypes") or info.get("meallist") or ""
+    )[:400]
+    card["rooms"] = (info.get("roomtypes") or "")[:400]
+    if images_list:
+        # Не дублируем image_url — он первым; берём до 8 фото.
+        unique = []
+        seen = set()
+        for url in [card.get("image_url"), *images_list]:
+            if url and url not in seen:
+                seen.add(url)
+                unique.append(url)
+        card["images"] = unique[:8]
 
 
 @app.post("/api/collection")
@@ -3423,8 +3550,20 @@ def create_collection():
 
     profile = None
     cid = data.get("conversation_id")
+    session: Optional[CopilotSession] = None
     if cid and cid in SESSIONS:
-        profile = SESSIONS[cid].client_profile
+        session = SESSIONS[cid]
+        profile = session.client_profile
+
+    # Догружаем описание/фото/инфраструктуру для модалки на share-странице.
+    # Делаем синхронно поверх asyncio — это разовая операция при создании
+    # подборки, ~1–3 сек на 5 отелей в живом режиме.
+    try:
+        asyncio.run(
+            _enrich_share_cards_with_hotel_info(cards_payload, session=session)
+        )
+    except Exception:
+        logger.exception("collection enrichment failed (non-fatal)")
 
     _purge_expired_collections()
 
@@ -3465,8 +3604,40 @@ def _format_price_ru(value: int, currency: str = "RUB") -> str:
     return f"{formatted} {currency}"
 
 
-def _render_share_card(card: Dict[str, Any]) -> str:
-    """HTML карточки для публичной страницы. Без ссылок на Tourvisor."""
+def _flight_html_for_share(flight: Dict[str, Any]) -> str:
+    """Компактный блок «Зафиксированный перелёт» для карточек и модалки."""
+    if not flight:
+        return ""
+    airline = html_escape(flight.get("airline") or "")
+    fwd = flight.get("forward") or {}
+    bwd = flight.get("backward") or {}
+    baggage = html_escape(flight.get("baggage") or "уточняется у оператора")
+    return f"""
+    <div class="flight-block">
+      <div class="flight-title">Зафиксированный перелёт</div>
+      <div class="flight-row">
+        <span class="airline">{airline}</span>
+        <span class="route">
+          {html_escape(fwd.get('from_code') or fwd.get('from') or '')} {html_escape(fwd.get('depart_time') or '')}
+          → {html_escape(fwd.get('to_code') or fwd.get('to') or '')} {html_escape(fwd.get('arrive_time') or '')}
+        </span>
+      </div>
+      <div class="flight-row">
+        <span class="airline">обратно</span>
+        <span class="route">
+          {html_escape(bwd.get('from_code') or bwd.get('from') or '')} {html_escape(bwd.get('depart_time') or '')}
+          → {html_escape(bwd.get('to_code') or bwd.get('to') or '')} {html_escape(bwd.get('arrive_time') or '')}
+        </span>
+      </div>
+      <div class="flight-baggage">Багаж: {baggage}</div>
+    </div>
+    """
+
+
+def _render_share_card(card: Dict[str, Any], index: int) -> str:
+    """HTML карточки для публичной страницы. Без ссылок на Tourvisor.
+    `index` нужен для JS-обработчика модалки детального просмотра.
+    """
     img = card.get("image_url") or ""
     if img.startswith("//"):
         img = "https:" + img
@@ -3483,32 +3654,7 @@ def _render_share_card(card: Dict[str, Any]) -> str:
     )
 
     flight = card.get("flight") or {}
-    flight_block = ""
-    if flight:
-        airline = html_escape(flight.get("airline") or "")
-        fwd = flight.get("forward") or {}
-        bwd = flight.get("backward") or {}
-        baggage = html_escape(flight.get("baggage") or "уточняется у оператора")
-        flight_block = f"""
-        <div class="flight-block">
-          <div class="flight-title">Зафиксированный перелёт</div>
-          <div class="flight-row">
-            <span class="airline">{airline}</span>
-            <span class="route">
-              {html_escape(fwd.get('from_code') or fwd.get('from') or '')} {html_escape(fwd.get('depart_time') or '')}
-              → {html_escape(fwd.get('to_code') or fwd.get('to') or '')} {html_escape(fwd.get('arrive_time') or '')}
-            </span>
-          </div>
-          <div class="flight-row">
-            <span class="airline">обратно</span>
-            <span class="route">
-              {html_escape(bwd.get('from_code') or bwd.get('from') or '')} {html_escape(bwd.get('depart_time') or '')}
-              → {html_escape(bwd.get('to_code') or bwd.get('to') or '')} {html_escape(bwd.get('arrive_time') or '')}
-            </span>
-          </div>
-          <div class="flight-baggage">Багаж: {baggage}</div>
-        </div>
-        """
+    flight_block = _flight_html_for_share(flight)
 
     meta_parts: List[str] = []
     if card.get("date_from"):
@@ -3521,7 +3667,8 @@ def _render_share_card(card: Dict[str, Any]) -> str:
         meta_parts.append(f"из {html_escape(card['departure_city'])}")
 
     return f"""
-    <article class="card">
+    <article class="card" data-index="{index}" tabindex="0" role="button"
+             aria-label="Открыть подробности по отелю {html_escape(card.get('hotel_name') or '')}">
       {img_block}
       <div class="card-body">
         <header class="card-head">
@@ -3546,10 +3693,91 @@ def _render_share_card(card: Dict[str, Any]) -> str:
             <span class="price-value">{_format_price_ru(card.get('price') or 0, card.get('currency') or 'RUB')}</span>
             <span class="price-suffix">за тур</span>
           </div>
+          <span class="card-cta">Подробнее →</span>
         </div>
       </div>
     </article>
     """
+
+
+def _split_semicolon_chips(text: str, *, limit: int = 12) -> List[str]:
+    """Tourvisor возвращает услуги списком через ';' — режем и обрезаем."""
+    if not text:
+        return []
+    chips: List[str] = []
+    for chunk in str(text).split(";"):
+        chunk = chunk.strip()
+        if chunk:
+            chips.append(chunk[:48])
+        if len(chips) >= limit:
+            break
+    return chips
+
+
+def _render_modal_payload(card: Dict[str, Any]) -> Dict[str, Any]:
+    """Подготавливает плоский dict для inline JS-модалки: только примитивы."""
+    images = []
+    for url in card.get("images") or []:
+        if not url:
+            continue
+        if url.startswith("//"):
+            url = "https:" + url
+        images.append(url)
+    if not images and card.get("image_url"):
+        images = [card["image_url"]]
+
+    flight = card.get("flight") or {}
+    flight_payload: Optional[Dict[str, Any]] = None
+    if flight:
+        fwd = flight.get("forward") or {}
+        bwd = flight.get("backward") or {}
+        flight_payload = {
+            "airline": flight.get("airline") or "",
+            "baggage": flight.get("baggage") or "",
+            "forward": {
+                "from": fwd.get("from") or "",
+                "from_code": fwd.get("from_code") or "",
+                "to": fwd.get("to") or "",
+                "to_code": fwd.get("to_code") or "",
+                "depart_time": fwd.get("depart_time") or "",
+                "arrive_time": fwd.get("arrive_time") or "",
+                "depart_date": fwd.get("depart_date") or "",
+            },
+            "backward": {
+                "from": bwd.get("from") or "",
+                "from_code": bwd.get("from_code") or "",
+                "to": bwd.get("to") or "",
+                "to_code": bwd.get("to_code") or "",
+                "depart_time": bwd.get("depart_time") or "",
+                "arrive_time": bwd.get("arrive_time") or "",
+                "depart_date": bwd.get("depart_date") or "",
+            },
+        }
+
+    return {
+        "name": card.get("hotel_name") or "",
+        "stars": int(card.get("hotel_stars") or 0),
+        "rating": str(card.get("hotel_rating") or ""),
+        "country": card.get("country") or "",
+        "resort": card.get("resort") or "",
+        "price": int(card.get("price") or 0),
+        "currency": card.get("currency") or "RUB",
+        "nights": int(card.get("nights") or 0),
+        "date_from": card.get("date_from") or "",
+        "date_to": card.get("date_to") or "",
+        "meal_description": card.get("meal_description") or "",
+        "departure_city": card.get("departure_city") or "",
+        "sea_distance": card.get("sea_distance") or "",
+        "description": card.get("description") or "",
+        "beach": card.get("beach") or "",
+        "child": card.get("child") or "",
+        "rooms": _split_semicolon_chips(card.get("rooms") or "", limit=8),
+        "services": _split_semicolon_chips(card.get("services") or "", limit=12),
+        "mealtypes": _split_semicolon_chips(card.get("mealtypes") or "", limit=8),
+        "images": images,
+        "flight": flight_payload,
+        "flight_summary": card.get("flight_summary") or "",
+    }
 
 
 _SHARE_PAGE_CSS = """
@@ -3642,11 +3870,108 @@ body {
 .flight-row .airline { font-weight: 600; min-width: 90px; }
 .flight-row .route { color: #0369a1; }
 .flight-baggage { margin-top: 6px; font-size: 12px; color: #075985; opacity: 0.85; }
-.card-foot { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 4px; }
+.card-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 4px; }
 .card-price { display: flex; align-items: baseline; gap: 6px; }
 .price-label { color: var(--muted); font-size: 12px; }
 .price-value { font-size: 24px; font-weight: 800; color: var(--ink); letter-spacing: -0.02em; }
 .price-suffix { color: var(--muted); font-size: 12px; }
+.card-cta {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--brand-deep);
+  background: rgba(0, 154, 243, 0.08);
+  padding: 6px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.card { cursor: pointer; }
+.card:focus-visible { outline: 3px solid rgba(0, 154, 243, 0.35); outline-offset: 2px; }
+
+/* === Modal === */
+.modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(6px);
+  display: none; align-items: flex-start; justify-content: center;
+  padding: 32px 16px;
+  overflow-y: auto; z-index: 100;
+}
+.modal-backdrop.is-open { display: flex; }
+.modal {
+  width: 100%; max-width: 880px;
+  background: var(--card);
+  border-radius: 24px;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.25);
+  display: flex; flex-direction: column;
+}
+.modal-header {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 16px; padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-title-block h2 { margin: 0 0 4px 0; font-size: 22px; font-weight: 800; letter-spacing: -0.01em; }
+.modal-title-block .modal-loc { font-size: 13px; color: var(--muted); display: flex; gap: 6px; flex-wrap: wrap; }
+.modal-title-block .modal-stars { color: #f59e0b; font-size: 14px; letter-spacing: 1px; margin-top: 4px; }
+.modal-close {
+  border: 0; background: var(--bg);
+  width: 36px; height: 36px;
+  border-radius: 50%; cursor: pointer;
+  font-size: 20px; color: var(--ink);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-close:hover { background: var(--border); }
+.modal-body { padding: 20px 24px 24px; display: flex; flex-direction: column; gap: 18px; }
+.gallery {
+  display: grid; grid-template-columns: 2fr 1fr 1fr;
+  gap: 6px; border-radius: 18px; overflow: hidden;
+}
+.gallery-img {
+  background-size: cover; background-position: center;
+  background-color: #cbd5e1;
+  min-height: 120px;
+}
+.gallery-img.gallery-main { grid-row: span 2; min-height: 260px; }
+.gallery-img.gallery-empty {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 48px; background: linear-gradient(135deg, #e0f2fe, #f0f9ff);
+}
+@media (max-width: 640px) {
+  .gallery { grid-template-columns: 1fr 1fr; }
+  .gallery-img.gallery-main { grid-row: auto; min-height: 200px; grid-column: span 2; }
+}
+.modal-section h3 { margin: 0 0 8px 0; font-size: 15px; font-weight: 700; color: var(--ink); }
+.modal-section p { margin: 0; font-size: 14px; color: var(--ink); line-height: 1.5; }
+.modal-section .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.modal-section .chips span {
+  background: #f1f5f9;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px; color: #475569;
+}
+.fact-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.fact {
+  background: #f6f9fc;
+  border-radius: 14px;
+  padding: 12px 14px;
+}
+.fact .fact-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.fact .fact-value { font-size: 14px; font-weight: 700; color: var(--ink); margin-top: 2px; }
+.modal-cta {
+  background: linear-gradient(135deg, var(--brand), var(--brand-deep));
+  color: white;
+  border-radius: 16px;
+  padding: 16px 20px;
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  flex-wrap: wrap;
+}
+.modal-cta .price-row { display: flex; align-items: baseline; gap: 8px; }
+.modal-cta .price-row .label { font-size: 12px; opacity: 0.85; }
+.modal-cta .price-row .value { font-size: 22px; font-weight: 800; }
+.modal-cta .cta-note { font-size: 12px; opacity: 0.92; max-width: 260px; }
 .footer {
   margin-top: 36px;
   text-align: center;
@@ -3654,6 +3979,210 @@ body {
   color: var(--muted);
   padding: 16px;
 }
+"""
+
+
+_SHARE_PAGE_JS = r"""
+(function () {
+  var dataNode = document.getElementById('share-data');
+  if (!dataNode) return;
+  var hotels;
+  try { hotels = JSON.parse(dataNode.textContent || '[]'); }
+  catch (e) { hotels = []; }
+  if (!hotels.length) return;
+
+  var modal = document.getElementById('share-modal');
+  var modalCard = document.getElementById('share-modal-card');
+  if (!modal || !modalCard) return;
+
+  function escape(html) {
+    if (html == null) return '';
+    return String(html)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function formatPrice(value, currency) {
+    if (!value) return '—';
+    var formatted = String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+    if (!currency || currency === 'RUB') return formatted + ' ₽';
+    return formatted + ' ' + currency;
+  }
+
+  function chipsBlock(title, chips) {
+    if (!chips || !chips.length) return '';
+    var inner = chips.map(function (c) { return '<span>' + escape(c) + '</span>'; }).join('');
+    return (
+      '<section class="modal-section">' +
+      '<h3>' + escape(title) + '</h3>' +
+      '<div class="chips">' + inner + '</div>' +
+      '</section>'
+    );
+  }
+
+  function textBlock(title, text) {
+    if (!text || !String(text).trim()) return '';
+    return (
+      '<section class="modal-section">' +
+      '<h3>' + escape(title) + '</h3>' +
+      '<p>' + escape(text) + '</p>' +
+      '</section>'
+    );
+  }
+
+  function galleryHtml(images) {
+    if (!images || !images.length) {
+      return '<div class="gallery"><div class="gallery-img gallery-empty">🏨</div></div>';
+    }
+    var pieces = [];
+    var main = images[0];
+    pieces.push(
+      '<div class="gallery-img gallery-main" style="background-image:url(\'' + escape(main) + '\')"></div>'
+    );
+    for (var i = 1; i < images.length && i < 5; i++) {
+      pieces.push(
+        '<div class="gallery-img" style="background-image:url(\'' + escape(images[i]) + '\')"></div>'
+      );
+    }
+    return '<div class="gallery">' + pieces.join('') + '</div>';
+  }
+
+  function flightHtml(flight, fallbackSummary) {
+    if (!flight) {
+      if (fallbackSummary) {
+        return textBlock('Перелёт', fallbackSummary);
+      }
+      return '';
+    }
+    var fwd = flight.forward || {};
+    var bwd = flight.backward || {};
+    var baggage = flight.baggage || 'уточняется у оператора';
+    return (
+      '<section class="modal-section">' +
+      '<h3>Зафиксированный перелёт</h3>' +
+      '<div class="flight-block" style="margin:0">' +
+      '<div class="flight-row"><span class="airline">' + escape(flight.airline || '') + '</span>' +
+      '<span class="route">' +
+      escape(fwd.from_code || fwd.from || '') + ' ' + escape(fwd.depart_time || '') +
+      ' → ' + escape(fwd.to_code || fwd.to || '') + ' ' + escape(fwd.arrive_time || '') +
+      '</span></div>' +
+      '<div class="flight-row"><span class="airline">обратно</span>' +
+      '<span class="route">' +
+      escape(bwd.from_code || bwd.from || '') + ' ' + escape(bwd.depart_time || '') +
+      ' → ' + escape(bwd.to_code || bwd.to || '') + ' ' + escape(bwd.arrive_time || '') +
+      '</span></div>' +
+      '<div class="flight-baggage">Багаж: ' + escape(baggage) + '</div>' +
+      '</div>' +
+      '</section>'
+    );
+  }
+
+  function factGrid(hotel) {
+    var facts = [];
+    if (hotel.date_from) {
+      facts.push({ label: 'Дата вылета', value: hotel.date_from });
+    }
+    if (hotel.nights) {
+      facts.push({ label: 'Ночей', value: hotel.nights });
+    }
+    if (hotel.meal_description) {
+      facts.push({ label: 'Питание', value: hotel.meal_description });
+    }
+    if (hotel.departure_city) {
+      facts.push({ label: 'Город вылета', value: hotel.departure_city });
+    }
+    if (hotel.sea_distance) {
+      facts.push({ label: 'До моря', value: hotel.sea_distance });
+    }
+    if (hotel.rating && hotel.rating !== '0') {
+      facts.push({ label: 'Рейтинг', value: '★ ' + hotel.rating });
+    }
+    if (!facts.length) return '';
+    var inner = facts.map(function (f) {
+      return (
+        '<div class="fact"><div class="fact-label">' + escape(f.label) + '</div>' +
+        '<div class="fact-value">' + escape(f.value) + '</div></div>'
+      );
+    }).join('');
+    return '<section class="modal-section"><div class="fact-grid">' + inner + '</div></section>';
+  }
+
+  function renderModal(hotel) {
+    var stars = '★'.repeat(Math.max(1, Math.min(5, hotel.stars || 0)));
+    var location = [hotel.country, hotel.resort].filter(Boolean).join(' · ');
+    var rooms = chipsBlock('Типы номеров', hotel.rooms);
+    var services = chipsBlock('Сервисы', hotel.services);
+    var meals = chipsBlock('Варианты питания', hotel.mealtypes);
+    var flightSection = flightHtml(hotel.flight, hotel.flight_summary);
+    var html =
+      '<header class="modal-header">' +
+      '<div class="modal-title-block">' +
+      '<h2>' + escape(hotel.name) + '</h2>' +
+      '<div class="modal-loc"><span>' + escape(location) + '</span></div>' +
+      '<div class="modal-stars">' + stars + '</div>' +
+      '</div>' +
+      '<button class="modal-close" type="button" aria-label="Закрыть" data-close>×</button>' +
+      '</header>' +
+      '<div class="modal-body">' +
+      galleryHtml(hotel.images) +
+      factGrid(hotel) +
+      textBlock('Про отель', hotel.description) +
+      textBlock('Пляж', hotel.beach) +
+      textBlock('Для детей', hotel.child) +
+      flightSection +
+      rooms + services + meals +
+      '<div class="modal-cta">' +
+      '<div class="price-row">' +
+      '<span class="label">Стоимость тура</span>' +
+      '<span class="value">' + escape(formatPrice(hotel.price, hotel.currency)) + '</span>' +
+      '</div>' +
+      '<div class="cta-note">Свяжитесь с менеджером, чтобы забронировать или уточнить детали.</div>' +
+      '</div>' +
+      '</div>';
+    modalCard.innerHTML = html;
+  }
+
+  function openModal(index) {
+    var hotel = hotels[index];
+    if (!hotel) return;
+    renderModal(hotel);
+    modal.classList.add('is-open');
+    modal.setAttribute('aria-hidden', 'false');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeModal() {
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+    document.body.style.overflow = '';
+  }
+
+  document.querySelectorAll('#share-cards .card').forEach(function (card) {
+    card.addEventListener('click', function () {
+      var idx = parseInt(card.getAttribute('data-index') || '0', 10);
+      openModal(idx);
+    });
+    card.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        var idx = parseInt(card.getAttribute('data-index') || '0', 10);
+        openModal(idx);
+      }
+    });
+  });
+
+  modal.addEventListener('click', function (e) {
+    if (e.target === modal || (e.target instanceof Element && e.target.hasAttribute('data-close'))) {
+      closeModal();
+    }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && modal.classList.contains('is-open')) closeModal();
+  });
+})();
 """
 
 
@@ -3681,10 +4210,15 @@ def share_collection(collection_id: str):
     elif min_price:
         summary_chips.append(f"от {_format_price_ru(min_price)}")
 
-    cards_html = "\n".join(_render_share_card(c) for c in cards)
+    cards_html = "\n".join(_render_share_card(c, idx) for idx, c in enumerate(cards))
     summary_html = "".join(f"<span>{html_escape(s)}</span>" for s in summary_chips)
     profile_html = (
         f"<p>{html_escape(profile)}</p>" if profile else "<p>Подобрали для вас несколько вариантов — посмотрите и выберите тот, что нравится больше.</p>"
+    )
+
+    modal_data = json.dumps(
+        [_render_modal_payload(c) for c in cards],
+        ensure_ascii=False,
     )
 
     html = f"""<!doctype html>
@@ -3702,11 +4236,18 @@ def share_collection(collection_id: str):
       {profile_html}
       <div class="summary">{summary_html}</div>
     </section>
-    <section class="cards">
+    <section class="cards" id="share-cards">
       {cards_html}
     </section>
     <div class="footer">Подборка действует 30 дней. Свяжитесь с менеджером, чтобы забронировать.</div>
   </div>
+
+  <div class="modal-backdrop" id="share-modal" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="modal" id="share-modal-card"></div>
+  </div>
+
+  <script id="share-data" type="application/json">{modal_data}</script>
+  <script>{_SHARE_PAGE_JS}</script>
 </body>
 </html>"""
     return Response(html, mimetype="text/html; charset=utf-8")

@@ -50,9 +50,15 @@ export function TourCardComponent({
     (a, b) => FLAG_PRIORITY[a.severity] - FLAG_PRIORITY[b.severity]
   );
   const flagsForBadges = sortedFlags.slice(0, 3);
-  const seriousFlags = sortedFlags.filter(
-    (f) => f.severity === "warning" || f.severity === "risk"
-  );
+  // Если backend уже прислал агентский флаг (on_request / night_flight), не
+  // дублируем эти бейджи через старые legacy-поля карточки.
+  const flagTypes = new Set(flags.map((f) => f.type));
+  const showLegacyOnRequest = !flagTypes.has("on_request") && card.on_request;
+  const showLegacyNightFlight =
+    !flagTypes.has("night_flight") && (card.night_flight ?? 0) > 0;
+  // hotelStatus !== "Есть места" фактически означает «под запрос» — закрыто
+  // флагом on_request, оставляем только зелёный «Есть места».
+  const showHotelStatus = hotelStatus && card.hotel_status === 2;
 
   return (
     <div
@@ -116,7 +122,7 @@ export function TourCardComponent({
               Горящий тур
             </Badge>
           )}
-          {card.on_request && (
+          {showLegacyOnRequest && (
             <Badge variant="outline" className="text-[10px]">
               Под запрос
             </Badge>
@@ -126,7 +132,7 @@ export function TourCardComponent({
               Промо
             </Badge>
           )}
-          {(card.night_flight ?? 0) > 0 && (
+          {showLegacyNightFlight && (
             <Badge variant="outline" className="text-[10px]">
               Ночной перелёт
             </Badge>
@@ -136,14 +142,8 @@ export function TourCardComponent({
               {flightWarning}
             </Badge>
           )}
-          {hotelStatus && (
-            <Badge
-              variant={(card.hotel_status ?? 0) === 2 ? "default" : "outline"}
-              className={cn(
-                "text-[10px]",
-                card.hotel_status === 2 && "bg-green-500 text-white"
-              )}
-            >
+          {showHotelStatus && (
+            <Badge className="text-[10px] bg-green-500 text-white">
               {hotelStatus}
             </Badge>
           )}
@@ -210,17 +210,6 @@ export function TourCardComponent({
             </Button>
           </div>
         </div>
-
-        {seriousFlags.length > 0 && (
-          <div className="mt-2 rounded-lg border border-amber-100 bg-amber-50/60 px-2.5 py-1.5">
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">
-              На что обратить внимание
-            </p>
-            <p className="mt-0.5 text-[11px] leading-snug text-amber-800">
-              {seriousFlags.slice(0, 3).map((f) => f.label).join(" · ")}
-            </p>
-          </div>
-        )}
 
         {card.selected_flight && (
           <div className="mt-2 flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[11px] font-medium text-emerald-700">

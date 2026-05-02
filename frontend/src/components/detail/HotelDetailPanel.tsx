@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { TourCard, HotelInfo, FlightOption, FlightSegment } from "@/lib/types";
+import { CheckCircle2 } from "lucide-react";
 import { getHotelInfo, getTourFlights, fixImageUrl } from "@/lib/api";
 import { formatPrice } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -24,6 +25,10 @@ interface HotelDetailPanelProps {
   onFavorite?: (card: TourCard) => void;
   isFavorited?: boolean;
   onOpenGallery?: (images: string[], startIndex: number) => void;
+  /** Если задан — на вкладке «Перелёт» появится CTA «Зафиксировать конфигурацию»;
+   *  при нажатии модалка закрывается и колбэк добавляет в чат пару сообщений
+   *  с обновлённой карточкой (selected_flight + flight_summary + новая цена). */
+  onSelectFlight?: (card: TourCard, option: FlightOption) => void;
 }
 
 /* ───────── Small helpers ───────── */
@@ -192,7 +197,7 @@ function FlightSegmentCard({ seg, label }: { seg: FlightSegment; label: string }
 /* ───────── Main Component ───────── */
 
 export function HotelDetailPanel({
-  card, onClose, onFavorite, isFavorited = false, onOpenGallery,
+  card, onClose, onFavorite, isFavorited = false, onOpenGallery, onSelectFlight,
 }: HotelDetailPanelProps) {
   const [hotelInfo, setHotelInfo] = useState<HotelInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -807,7 +812,7 @@ export function HotelDetailPanel({
                       {card.hotel_link ? (
                         <Button className="bg-brand hover:bg-brand-dark text-white font-semibold px-5 shrink-0" asChild>
                           <a href={card.hotel_link} target="_blank" rel="noopener noreferrer">
-                            Забронировать на mgp.ru<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
+                            Открыть на mgp.ru<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
                           </a>
                         </Button>
                       ) : (
@@ -816,6 +821,19 @@ export function HotelDetailPanel({
                         </Button>
                       )}
                     </div>
+                    {onSelectFlight ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onSelectFlight(card, selected);
+                          onClose();
+                        }}
+                        className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-brand text-white text-sm font-semibold px-3 py-2.5 transition hover:bg-brand-dark"
+                      >
+                        <CheckCircle2 className="h-4 w-4" />
+                        Зафиксировать конфигурацию
+                      </button>
+                    ) : null}
                     <div className="flex items-center gap-2 pt-2 border-t border-border/30">
                       <ShieldCheck className="h-3.5 w-3.5 text-brand shrink-0" />
                       <p className="text-[11px] text-muted-foreground leading-tight">

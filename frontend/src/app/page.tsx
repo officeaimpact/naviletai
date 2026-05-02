@@ -14,7 +14,7 @@ import { AboutView } from "@/components/about/AboutView";
 import { PartnersView } from "@/components/partners/PartnersView";
 import { useChat } from "@/hooks/useChat";
 import { useFavorites } from "@/hooks/useFavorites";
-import { TourCard } from "@/lib/types";
+import { TourCard, FlightOption } from "@/lib/types";
 import { AnimatePresence, motion } from "framer-motion";
 import { X, Map } from "lucide-react";
 
@@ -72,6 +72,7 @@ export default function Home() {
     send,
     newChat,
     selectSession,
+    appendLocal,
   } = useChat();
 
   const { toggleFavorite, isFavorited, favoritedIds } = useFavorites();
@@ -136,6 +137,109 @@ export default function Home() {
     selectSession(id);
   }, [selectSession]);
 
+  /** Зафиксировать выбранный рейс для тура — повтор UX из reference-репозитория.
+   *  Локально (без LLM) добавляет в чат пару:
+   *  - user: «Зафиксирую конфигурацию: …»
+   *  - assistant: подтверждение + одна обновлённая карточка с selected_flight,
+   *    flight_summary, новой ценой и сохранённой исходной карточкой как базы.
+   */
+  const handleSelectFlight = useCallback(
+    (sourceCard: TourCard, option: FlightOption) => {
+      const fwd = option.forward[0];
+      const bwd = option.backward[0];
+      const airline = fwd?.airline || "авиакомпания";
+      const fwdSummary = fwd
+        ? `${fwd.departure_airport_code || fwd.departure_airport}→${
+            fwd.arrival_airport_code || fwd.arrival_airport
+          } ${fwd.departure_time}–${fwd.arrival_time}`
+        : "перелёт туда";
+      const bwdSummary = bwd
+        ? `${bwd.departure_airport_code || bwd.departure_airport}→${
+            bwd.arrival_airport_code || bwd.arrival_airport
+          } ${bwd.departure_time}–${bwd.arrival_time}`
+        : "перелёт обратно";
+      const newPrice = option.price || sourceCard.price;
+      const flightSummary = `${airline} · ${fwdSummary} / ${bwdSummary}`;
+      const fallbackDeparture =
+        sourceCard.departure_city ||
+        fwd?.departure_airport ||
+        fwd?.departure_airport_code ||
+        "";
+
+      const updatedCard: TourCard = {
+        ...sourceCard,
+        // Сохраняем тот же tour_id, чтобы favourites/share не потеряли карточку.
+        // Под капотом уточняется только перелёт.
+        price: newPrice,
+        date_from: option.date_forward || sourceCard.date_from,
+        date_to: option.date_backward || sourceCard.date_to,
+        departure_city: fallbackDeparture,
+        selected_flight: option,
+        flight_summary: flightSummary,
+      };
+
+      const baggageNote = fwd?.baggage
+        ? `Багаж: ${fwd.baggage}.`
+        : "Багаж: уточняется у оператора.";
+      const carryNote = fwd?.carry_on ? ` Ручная кладь: ${fwd.carry_on}.` : "";
+      const fuelNote =
+        option.fuel_charge && option.fuel_charge > 0
+          ? ` Топливный сбор: ${option.fuel_charge.toLocaleString("ru-RU")} ₽.`
+          : "";
+      const onDemandNote =
+        fwd?.on_demand || bwd?.on_demand
+          ? " Часть рейса под запрос — нужно подтверждение оператора."
+          : "";
+
+      const userMsg = `Зафиксирую конфигурацию: ${sourceCard.hotel_name} — рейс ${airline} (${fwdSummary}).`;
+      const assistantMsg =
+        `Зафиксировал: ${sourceCard.hotel_name} (${sourceCard.hotel_stars}★, ${sourceCard.country}, ${sourceCard.resort}). ` +
+        `Перелёт: ${airline}, ${fwdSummary} → ${bwdSummary}. ` +
+        `Цена с этим рейсом: ${newPrice.toLocaleString("ru-RU")} ₽ за ${sourceCard.nights} ночей. ` +
+        `${baggageNote}${carryNote}${fuelNote}${onDemandNote} ` +
+        `Дальше: проверить актуальность цены, сформировать сообщение клиенту или подобрать альтернативу.`;
+
+      appendLocal(userMsg, assistantMsg, [updatedCard]);
+    },
+    [appendLocal]
+  );
+
+  /** Финальная подборка из выбранных карточек: добавляем в чат пару
+   *  сообщений + те же карточки. Под bubble автоматически появится
+   *  кнопка «Поделиться подборкой» (берёт `message.tour_cards`). */
+  const handleCollectFinal = useCallback(
+    (selected: TourCard[]) => {
+      if (!selected.length) return;
+      const names = selected.map((c) => c.hotel_name).filter(Boolean);
+      const namesLine =
+        names.length <= 4
+          ? names.join(", ")
+          : `${names.slice(0, 3).join(", ")} и ещё ${names.length - 3}`;
+      const totalMin = Math.min(...selected.map((c) => c.price || 0).filter((p) => p > 0));
+      const totalMax = Math.max(...selected.map((c) => c.price || 0).filter((p) => p > 0));
+      const priceLine =
+        Number.isFinite(totalMin) && Number.isFinite(totalMax) && totalMin > 0
+          ? totalMin === totalMax
+            ? `Цена: от ${totalMin.toLocaleString("ru-RU")} ₽.`
+            : `Цена: от ${totalMin.toLocaleString("ru-RU")} ₽ до ${totalMax.toLocaleString("ru-RU")} ₽.`
+          : "";
+      const userMsg = `Собираю финальную подборку из ${selected.length} ${
+        selected.length === 1 ? "тура" : selected.length < 5 ? "туров" : "туров"
+      }: ${namesLine}.`;
+      const assistantMsg = [
+        `Готово — финальная подборка из ${selected.length} ${
+          selected.length === 1 ? "варианта" : "вариантов"
+        } для клиента.`,
+        priceLine,
+        "Можно поделиться публичной HTML-страницей через кнопку под этим сообщением — она открывается без логина и без следов TourVisor.",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      appendLocal(userMsg, assistantMsg, selected);
+    },
+    [appendLocal]
+  );
+
   return (
     <div className="flex h-screen h-[100dvh] overflow-hidden bg-background">
       {/* Desktop Sidebar */}
@@ -193,6 +297,7 @@ export default function Home() {
                   onCardFavorite={toggleFavorite}
                   favoritedIds={favoritedIds}
                   onShowMap={openMap}
+                  onCollectFinal={handleCollectFinal}
                 />
                 <InputBar
                   onSend={send}
@@ -222,6 +327,7 @@ export default function Home() {
                   onFavorite={toggleFavorite}
                   isFavorited={isFavorited(selectedCard.tour_id)}
                   onOpenGallery={openGallery}
+                  onSelectFlight={handleSelectFlight}
                 />
               </motion.div>
             )}
@@ -257,6 +363,7 @@ export default function Home() {
                     onFavorite={toggleFavorite}
                     isFavorited={isFavorited(selectedCard.tour_id)}
                     onOpenGallery={openGallery}
+                    onSelectFlight={handleSelectFlight}
                   />
                 </motion.div>
               </motion.div>

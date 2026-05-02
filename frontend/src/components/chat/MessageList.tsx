@@ -4,7 +4,17 @@ import { useEffect, useRef, useState } from "react";
 import { ChatMessage, TourCard } from "@/lib/types";
 import { TourCardComponent } from "@/components/cards/TourCard";
 import { cn } from "@/lib/utils";
-import { AlertTriangle, Check, Copy, MapPin, Share2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  CheckSquare,
+  Copy,
+  ListChecks,
+  MapPin,
+  Share2,
+  Square,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import { createCollection } from "@/lib/api/copilot";
@@ -124,6 +134,9 @@ interface MessageListProps {
   onCardFavorite?: (card: TourCard) => void;
   favoritedIds?: Set<string>;
   onShowMap?: (cards: TourCard[]) => void;
+  /** Финальная подборка из выбранных карточек: ассистент кладёт их в чат
+   *  как новое сообщение с бейджем «Финальная подборка» и share-кнопкой. */
+  onCollectFinal?: (cards: TourCard[]) => void;
 }
 
 const STATUS_PHASES = [
@@ -180,12 +193,14 @@ function MessageBubble({
   onCardFavorite,
   favoritedIds,
   onShowMap,
+  onCollectFinal,
 }: {
   message: ChatMessage;
   onCardDetails?: (card: TourCard) => void;
   onCardFavorite?: (card: TourCard) => void;
   favoritedIds?: Set<string>;
   onShowMap?: (cards: TourCard[]) => void;
+  onCollectFinal?: (cards: TourCard[]) => void;
 }) {
   const isUser = message.role === "user";
   const hasTourCards = message.tour_cards && message.tour_cards.length > 0;
@@ -194,6 +209,31 @@ function MessageBubble({
     message.slots && Object.keys(message.slots).length > 0
       ? Object.entries(message.slots)
       : [];
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  const cards = message.tour_cards || [];
+  const selectedCards = cards.filter((c) => selectedIds.has(c.tour_id));
+
+  const exitSelection = () => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  };
+
+  const toggleSelected = (tourId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(tourId)) next.delete(tourId);
+      else next.add(tourId);
+      return next;
+    });
+  };
+
+  const handleSubmitSelection = () => {
+    if (selectedCards.length === 0 || !onCollectFinal) return;
+    onCollectFinal(selectedCards);
+    exitSelection();
+  };
 
   return (
     <motion.div
@@ -252,40 +292,108 @@ function MessageBubble({
 
       {hasTourCards && (
         <div className="space-y-3 max-w-3xl">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             <p className="text-xs text-muted-foreground">
-              Найдено {message.tour_cards!.length} вариантов
+              {selectionMode
+                ? `Выбрано ${selectedIds.size} из ${cards.length}`
+                : `Найдено ${cards.length} вариантов`}
             </p>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onShowMap?.(message.tour_cards!)}
-              className="gap-1.5"
-            >
-              <MapPin className="h-3.5 w-3.5" />
-              На карте
-            </Button>
+            {!selectionMode && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onShowMap?.(cards)}
+                className="gap-1.5"
+              >
+                <MapPin className="h-3.5 w-3.5" />
+                На карте
+              </Button>
+            )}
+            {!selectionMode && onCollectFinal && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setSelectionMode(true)}
+                className="gap-1.5 border-brand/40 text-brand hover:bg-brand/5"
+              >
+                <ListChecks className="h-3.5 w-3.5" />
+                Выбрать предложения
+              </Button>
+            )}
+            {selectionMode && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={exitSelection}
+                  className="gap-1.5"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Отмена
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleSubmitSelection}
+                  disabled={selectedCards.length === 0}
+                  className="gap-1.5 bg-brand text-white hover:bg-brand-dark disabled:opacity-50"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  Собрать подборку{selectedCards.length > 0 ? ` (${selectedCards.length})` : ""}
+                </Button>
+              </>
+            )}
           </div>
 
-          {message.tour_cards!.map((card, i) => (
-            <motion.div
-              key={card.tour_id || i}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{
-                duration: 0.35,
-                delay: i * 0.08,
-                ease: "easeOut",
-              }}
-            >
-              <TourCardComponent
-                card={card}
-                onDetails={onCardDetails}
-                onFavorite={onCardFavorite}
-                isFavorited={favoritedIds?.has(card.tour_id) ?? false}
-              />
-            </motion.div>
-          ))}
+          {cards.map((card, i) => {
+            const isSelected = selectedIds.has(card.tour_id);
+            return (
+              <motion.div
+                key={card.tour_id || i}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{
+                  duration: 0.35,
+                  delay: i * 0.08,
+                  ease: "easeOut",
+                }}
+                className={cn("relative", selectionMode && "rounded-xl")}
+                onClick={selectionMode ? () => toggleSelected(card.tour_id) : undefined}
+                role={selectionMode ? "button" : undefined}
+                aria-pressed={selectionMode ? isSelected : undefined}
+                style={selectionMode ? { cursor: "pointer" } : undefined}
+              >
+                <div
+                  className={cn(
+                    "transition-all",
+                    selectionMode &&
+                      (isSelected
+                        ? "ring-2 ring-brand rounded-xl"
+                        : "ring-1 ring-border/60 hover:ring-brand/40 rounded-xl"),
+                    selectionMode && "pointer-events-none"
+                  )}
+                >
+                  <TourCardComponent
+                    card={card}
+                    onDetails={onCardDetails}
+                    onFavorite={onCardFavorite}
+                    isFavorited={favoritedIds?.has(card.tour_id) ?? false}
+                  />
+                </div>
+                {selectionMode && (
+                  <div
+                    className={cn(
+                      "absolute top-3 right-3 z-10 flex h-7 w-7 items-center justify-center rounded-full border-2 transition-colors",
+                      isSelected
+                        ? "border-brand bg-brand text-white"
+                        : "border-border bg-white text-muted-foreground"
+                    )}
+                  >
+                    {isSelected ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
+                  </div>
+                )}
+              </motion.div>
+            );
+          })}
         </div>
       )}
     </motion.div>
@@ -299,6 +407,7 @@ export function MessageList({
   onCardFavorite,
   favoritedIds,
   onShowMap,
+  onCollectFinal,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -324,6 +433,7 @@ export function MessageList({
             onCardFavorite={onCardFavorite}
             favoritedIds={favoritedIds}
             onShowMap={onShowMap}
+            onCollectFinal={onCollectFinal}
           />
         ))}
         {isLoading && <TypingIndicator />}

@@ -277,6 +277,37 @@ export function useChat() {
     setError(null);
   }, []);
 
+  /**
+   * Локально добавить пару user/assistant сообщений в текущий чат.
+   * Не дёргает backend — нужно для UX-действий в HotelDetailPanel:
+   * «Зафиксировать перелёт», «Собрать подборку», «Актуализировать цену».
+   * Backend о таких действиях узнаёт уже из контекста следующего сообщения,
+   * но визуально пара появляется мгновенно.
+   */
+  const appendLocal = useCallback(
+    (
+      userText: string,
+      assistantText: string,
+      assistantCards?: ChatMessage["tour_cards"]
+    ) => {
+      const userMsg: ChatMessage = {
+        id: generateId(),
+        role: "user",
+        content: userText,
+        timestamp: Date.now(),
+      };
+      const assistantMsg: ChatMessage = {
+        id: generateId(),
+        role: "assistant",
+        content: assistantText,
+        tour_cards: assistantCards && assistantCards.length > 0 ? assistantCards : undefined,
+        timestamp: Date.now() + 1,
+      };
+      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+    },
+    []
+  );
+
   const selectSession = useCallback(
     async (id: string) => {
       setActiveSessionId(id);
@@ -335,5 +366,6 @@ export function useChat() {
     newChat,
     selectSession,
     deleteSession,
+    appendLocal,
   };
 }
