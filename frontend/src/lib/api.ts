@@ -116,15 +116,20 @@ export function fixImageUrl(url: string | null | undefined): string {
 
 export async function sendMessage(
   message: string,
-  conversationId?: string
+  conversationId?: string,
+  images?: string[]
 ): Promise<ChatResponse> {
+  const body: Record<string, unknown> = {
+    message,
+    conversation_id: conversationId,
+  };
+  if (images && images.length > 0) {
+    body.images = images.slice(0, 4);
+  }
   const res = await fetch(`${API_BASE}/api/v1/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      message,
-      conversation_id: conversationId,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -141,6 +146,35 @@ export async function resetSession(sessionId: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId }),
   });
+}
+
+export async function clearClientProfile(
+  conversationId: string
+): Promise<{ ok: boolean; client_profile: string | null }> {
+  const res = await fetch(`${API_BASE}/api/copilot/profile/clear`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversation_id: conversationId }),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to clear profile: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function setClientProfile(
+  conversationId: string,
+  profile: string
+): Promise<{ ok: boolean; client_profile: string | null }> {
+  const res = await fetch(`${API_BASE}/api/copilot/profile/set`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversation_id: conversationId, profile }),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to set profile: ${res.status}`);
+  }
+  return res.json();
 }
 
 export async function getStatus(): Promise<{

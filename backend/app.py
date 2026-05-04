@@ -6,6 +6,7 @@ Real OpenAI/OpenRouter agent with TourVisor function calling.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -137,6 +138,10 @@ class CopilotSession:
         # значение — сколько раз LLM попытался вызвать. Используется как
         # safety-net против петель (`get_tour_details` подряд по 3 турам).
         self.tools_used_this_turn: Dict[str, int] = {}
+        # Счётчик повторных LLM-вызовов в текущем ходе из-за stall-преамбул
+        # (см. `_detect_stall_preamble` и §0.1 системного промпта). Защита
+        # от бесконечного цикла коррекций: максимум 2 попытки за ход.
+        self.stall_retries_this_turn: int = 0
         self.created_at = datetime.utcnow()
 
     def reset_turn_state(self) -> None:
@@ -147,6 +152,7 @@ class CopilotSession:
         self.last_cascade_nudge = None
         self.allow_service_ids_this_turn = False
         self.tools_used_this_turn = {}
+        self.stall_retries_this_turn = 0
 
 
 SESSIONS: Dict[str, CopilotSession] = {}
@@ -448,6 +454,58 @@ def _wants_service_ids(text: str) -> bool:
     return bool(_SERVICE_ID_REQUEST_RE.search(text or ""))
 
 
+# ────────────────────────────────────────────────────────────────────
+# Stall-preamble guard (§0.1 enforcement)
+# ────────────────────────────────────────────────────────────────────
+# LLM иногда нарушает §0.1 системного промпта: вместо вызова tool_call
+# возвращает чистый текст вида «Запустил поиск. Хотите, чтобы я сразу
+# вывел результаты?». Внешне выглядит как успех, фактически — никакого
+# действия не произошло. Мы отлавливаем это регэкспами и форсируем
+# повтор хода с инъекцией исправительного system-сообщения.
+_STALL_PREAMBLE_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"(?:я\s+)?(?:уже\s+)?запустил[аи]?\s+поиск", re.I),
+    re.compile(r"поиск\s+запущен", re.I),
+    re.compile(r"запуска(?:ю|ем)\s+поиск", re.I),
+    re.compile(r"начина(?:ю|ем)\s+поиск", re.I),
+    re.compile(r"сейчас\s+(?:по)?ищу", re.I),
+    re.compile(r"секунд[уа]?[,\s]+ищу", re.I),
+    re.compile(r"момент[,\s]+(?:по)?ищу", re.I),
+    re.compile(r"одну\s+минут[ку]?", re.I),
+    re.compile(r"(?:я\s+)?(?:по)?ищу\s+(?:для\s+)?(?:вас|тебя|клиента)", re.I),
+    re.compile(r"(?:по)?подбира[юем][\s]", re.I),
+    re.compile(r"\bобрабат?ыва[юем]\s+запрос", re.I),
+    re.compile(r"анализирую\s+параметр", re.I),
+    re.compile(r"сейчас\s+(?:всё\s+)?подбер[ёе]м", re.I),
+    re.compile(r"беру\s+параметры\s+из", re.I),
+    re.compile(r"хотите[,\s]+чтобы\s+я\s+(?:сразу\s+)?(?:вывел|показал|подобрал|вывела)", re.I),
+    re.compile(r"хотите[,\s]+чтобы\s+(?:вывел|показал|подобрал)", re.I),
+    re.compile(r"выводить\s+(?:ли\s+)?результат", re.I),
+    re.compile(r"подобрать\s+топ[\-\s]*\d", re.I),
+    re.compile(r"сразу\s+вывел\s+результат", re.I),
+    re.compile(r"(?:я|мы)\s+могу\s+запустить\s+поиск", re.I),
+    re.compile(r"готов\s+запустить\s+поиск", re.I),
+    re.compile(r"^\s*[^\n]{0,120}\b(?:отлично|хорошо|понял)\b[^\n]{0,40}\s+начин", re.I),
+)
+
+
+def _detect_stall_preamble(text: str) -> List[str]:
+    """Возвращает список stall-паттернов, найденных в тексте LLM.
+
+    Используется как защита §0.1: если модель вернула финальный текст
+    БЕЗ tool_call и этот текст содержит «Запустил поиск», «Хотите, чтобы
+    я вывел результаты», «Сейчас подберу…» и т.п. — это признак
+    галлюцинации действия. Надо форсировать повторный ход.
+    """
+    if not text:
+        return []
+    hits: List[str] = []
+    for pattern in _STALL_PREAMBLE_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            hits.append(m.group(0)[:80])
+    return hits
+
+
 def _sanitize_agent_reply(text: str, *, allow_service_ids: bool = False) -> str:
     """Remove internal API-ish wording from normal assistant replies.
 
@@ -633,6 +691,133 @@ _HOTEL_INFO_FOLLOWUP_RE = re.compile(
 )
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Compare-intent detection (§7.5.1 «Сравнительный анализ ТУРА»).
+#
+# Сравнение часто триггерится в свободном диалоге, причём в сообщении
+# смешиваются слова, на которые срабатывает `_HOTEL_INFO_FOLLOWUP_RE`
+# (пляж, питание, описание). Без отдельного детектора backend перехватывал
+# такой запрос как «расскажи про первый отель» и отвечал описанием одного
+# отеля вместо сравнения. См. историю чата с правкой 6.
+#
+# Детектор устроен так:
+#   1) Прямые триггеры: «сравни», «сравнение», «vs», «что лучше»,
+#      «цена/качество», «соотношение цена», «плюсы и минусы», «отличия»,
+#      «разница между», «по фактам», «противопоставь».
+#   2) Неявные парные триггеры: «первый и второй», «1 и 3», «1 vs 2»,
+#      «A или B» — когда агент просто перечисляет позиции и ждёт сравнения.
+# ──────────────────────────────────────────────────────────────────────
+
+_COMPARE_TRIGGERS = [
+    r"\bсравни\w*",
+    r"\bсравнительн\w+",
+    r"\bсравнени[ея]\b",
+    r"\bпротивопоставь\w*",
+    r"\bvs\.?\b",
+    r"\bпротив\b(?!\s+того)",  # «друг против друга», но не «не против того, чтобы»
+    r"\bчто\s+(?:лучше|выбрать|предпоч|подойд)",
+    r"\bкак(?:ой|ая|ое|ие)\s+(?:лучше|подойд|выбрать|выгодн)",
+    r"\bкого\s+(?:выбрать|посоветуешь?|порекомендуешь?)\b",
+    r"\bразниц[аеыу]\s+между\b",
+    r"\bотличи[яей]\s+(?:между|у)\b",
+    r"\b(?:их|между\s+ними)\s+различи[яей]\b",
+    r"\bплюсы\s+и\s+минусы\b",
+    r"\b(?:по|на)\s+факт",
+    r"\bцен\w*[\s/-]+качеств",
+    r"\bсоотношен(?:ие|ия)\s+цен",
+    r"\bоптимальн\w*\s+(?:вариант|тур|отел|по\s+цен)",
+    r"\bвыгодн\w*\s+(?:вариант|тур|отел)",
+]
+_COMPARE_RE = re.compile("|".join(_COMPARE_TRIGGERS), re.I)
+
+_COMPARE_PAIR_PATTERNS = [
+    # «первый и второй», «второй или третий», «первый vs третий»
+    r"\b(?:перв|втор|трет|четв|пят)\w+\s+(?:и|или|vs|против)\s+(?:перв|втор|трет|четв|пят)\w+",
+    # «1 и 3», «1, 2», «1 vs 3», «варианты 1 и 2»
+    r"\b\d\s*(?:и|или|vs|против|,)\s*\d\b",
+    # «топ-1 и топ-3»
+    r"\bтоп[-\s]?\d\s*(?:и|или|vs|против|,)\s*топ[-\s]?\d",
+]
+_COMPARE_PAIR_RE = re.compile("|".join(_COMPARE_PAIR_PATTERNS), re.I)
+
+
+def _is_compare_request(text: str) -> bool:
+    """True если агент просит сравнение туров/отелей.
+
+    Должно быть консервативно: триггерит только явные слова или явные пары
+    позиций. Иначе будем перехватывать обычные follow-up'ы про один отель.
+    """
+    if not text:
+        return False
+    if _COMPARE_RE.search(text):
+        return True
+    return bool(_COMPARE_PAIR_RE.search(text))
+
+
+_COMPARE_ORDINAL_PATTERNS = (
+    (0, (r"\bперв\w*\b", r"\b1[-\s]?(?:й|ый|ая|ое|вариант|отел|тур)?", r"\bтоп[-\s]?1\b")),
+    (1, (r"\bвтор\w*\b", r"\b2[-\s]?(?:й|ой|ая|ое|вариант|отел|тур)?", r"\bтоп[-\s]?2\b")),
+    (2, (r"\bтрет\w*\b", r"\b3[-\s]?(?:й|ий|ья|ье|вариант|отел|тур)?", r"\bтоп[-\s]?3\b")),
+    (3, (r"\bчетв\w*\b", r"\b4[-\s]?(?:й|ый|ая|ое|вариант|отел|тур)?", r"\bтоп[-\s]?4\b")),
+    (4, (r"\bпят\w*\b", r"\b5[-\s]?(?:й|ый|ая|ое|вариант|отел|тур)?", r"\bтоп[-\s]?5\b")),
+)
+
+
+def _extract_compare_targets(
+    text: str,
+    cards: List[Dict[str, Any]],
+    *,
+    max_targets: int = 3,
+) -> List[Dict[str, Any]]:
+    """Выбрать 2–3 карточки для сравнения по позициям/именам в сообщении.
+
+    Сначала пробуем порядковые позиции (первый/второй, 1/2/3), потом fallback
+    на упоминание имени отеля. Если нашли только 1 цель — возвращаем [], это
+    сигнал «недостаточно для сравнения, отдадим LLM, пусть сама уточнит».
+    """
+    if not text or not cards:
+        return []
+    lowered = text.lower()
+    picked: List[Dict[str, Any]] = []
+    seen_keys: set = set()
+
+    def _try_add(card: Optional[Dict[str, Any]]) -> bool:
+        if not card or len(picked) >= max_targets:
+            return False
+        key = card.get("tour_id") or card.get("hotel_code") or id(card)
+        if key in seen_keys:
+            return False
+        seen_keys.add(key)
+        picked.append(card)
+        return True
+
+    for idx, patterns in _COMPARE_ORDINAL_PATTERNS:
+        if idx >= len(cards):
+            continue
+        if any(re.search(p, lowered) for p in patterns):
+            _try_add(cards[idx])
+            if len(picked) >= max_targets:
+                return picked
+
+    if len(picked) < max_targets:
+        for card in cards:
+            if len(picked) >= max_targets:
+                break
+            name = _coerce_str(card.get("hotel_name")).lower()
+            if not name:
+                continue
+            if name in lowered:
+                _try_add(card)
+                continue
+            words = [w for w in re.split(r"\W+", name) if len(w) >= 4]
+            if len(words) >= 2 and all(w in lowered for w in words[:2]):
+                _try_add(card)
+
+    if len(picked) < 2:
+        return []
+    return picked
+
+
 def _is_tour_details_request(text: str) -> bool:
     """Эвристика «агент просит ДЕТАЛИ тура» — для приоритета над hotel-info follow-up.
 
@@ -720,6 +905,11 @@ async def _try_direct_hotel_info_followup(
 ) -> Optional[Dict[str, Any]]:
     """Deterministically answer 'tell me about first hotel' without asking for hotelcode."""
     if not _HOTEL_INFO_FOLLOWUP_RE.search(user_message or ""):
+        return None
+    # ⚠️ Compare-intent: «сравни первый и второй: пляж, питание» содержит
+    # триггеры _HOTEL_INFO_FOLLOWUP_RE (пляж/питание), но это НЕ запрос про
+    # один отель. Пропускаем такие сообщения в LLM, где сработает compare-prefetch.
+    if _is_compare_request(user_message):
         return None
     # Если это явно запрос ДЕТАЛЕЙ тура / актуализации — отдаём LLM (§7.5.9 / §7.5.10),
     # потому что им нужны get_tour_details / actualize_tour, а не hotel.php.
@@ -1567,6 +1757,203 @@ def _compute_card_flags(
     return flags
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Recommendation / match flags — итерация 3 (логика продажи).
+#
+# Назначение: после того как `_compute_card_flags` поставил рисковые/
+# предупредительные флаги на каждую карточку, мы поверх всей выдачи
+# вычисляем 1–3 «рекомендательных» бейджа («Лучший вариант», «Премиум»,
+# «Дешевле») и опциональные match-бейджи под профиль клиента
+# («Для семьи», «Для пары»). Это даёт турагенту быструю подсказку,
+# какие карточки выделить, не теряя фактовых флагов (rating_low и т.п.).
+#
+# Severity:
+#   - "recommend" — главный CTA-бейдж (зелёный, эмодзи), top-priority;
+#   - "match"     — мягкий профиль-бейдж (фиолетовый), второй приоритет.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _card_rating_value(card: Dict[str, Any]) -> float:
+    raw = card.get("hotel_rating") or 0
+    try:
+        return float(str(raw).replace(",", "."))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _card_has_flag_type(card: Dict[str, Any], flag_type: str) -> bool:
+    flags = card.get("flags") or []
+    return any(isinstance(f, dict) and f.get("type") == flag_type for f in flags)
+
+
+def _is_family_profile(profile: Optional[str]) -> bool:
+    if not profile:
+        return False
+    p = profile.lower()
+    return bool(
+        re.search(
+            r"сем[ьяиё]|с\s*детьми|с\s*ребен|с\s*ребён|малыш|двое\s+дет|школьник",
+            p,
+        )
+    )
+
+
+def _is_couple_profile(profile: Optional[str]) -> bool:
+    if not profile:
+        return False
+    p = profile.lower()
+    return bool(re.search(r"\bпар[аое]\b|молодож|роман|медов\w*\s+месяц|вдво[её]м", p))
+
+
+def _apply_recommendation_flags(
+    cards: List[Dict[str, Any]],
+    client_profile: Optional[str] = None,
+) -> None:
+    """Поставить recommend/match-бейджи поверх выдачи карточек.
+
+    Меняет cards in place. Безопасно при пустой выдаче и при отсутствии
+    цен/рейтингов. Идемпотентна: предыдущие recommend/match флаги
+    очищаются и пересчитываются.
+    """
+    if not cards:
+        return
+
+    # Очищаем прошлые recommend/match (на случай повторного применения).
+    for card in cards:
+        flags = card.get("flags") or []
+        card["flags"] = [
+            f
+            for f in flags
+            if isinstance(f, dict)
+            and f.get("type") not in {
+                "recommend_optimum",
+                "recommend_premium",
+                "recommend_budget",
+                "match_family",
+                "match_couple",
+            }
+        ]
+
+    # Нужно минимум 3 карточки, иначе recommend-сегментация теряет смысл.
+    if len(cards) < 3:
+        return
+
+    # ── recommend_budget: самый дешёвый из выдачи ────────────────────
+    prices = [
+        (idx, _coerce_int(card.get("price"), default=0))
+        for idx, card in enumerate(cards)
+    ]
+    valid_prices = [(i, p) for i, p in prices if p > 0]
+    budget_idx: Optional[int] = None
+    if valid_prices:
+        budget_idx = min(valid_prices, key=lambda x: x[1])[0]
+
+    # ── recommend_premium: лучший рейтинг + ≥4* + не on_request ──────
+    premium_candidates = []
+    for idx, card in enumerate(cards):
+        if _card_has_flag_type(card, "on_request"):
+            continue
+        stars = _coerce_int(card.get("hotel_stars"), default=0)
+        rating = _card_rating_value(card)
+        if stars >= 4 and rating >= 4.2:
+            premium_candidates.append((idx, rating, _coerce_int(card.get("price"), default=0)))
+    premium_idx: Optional[int] = None
+    if premium_candidates:
+        premium_candidates.sort(key=lambda x: (-x[1], -x[2]))
+        premium_idx = premium_candidates[0][0]
+
+    # ── recommend_optimum: лучшее «цена / качество» ──────────────────
+    # Score = rating - normalized_price * 1.4. Чем выше — тем лучше value.
+    max_price = max((p for _, p in valid_prices), default=1) or 1
+    optimum_idx: Optional[int] = None
+    optimum_scores: List[Tuple[float, int]] = []
+    for idx, card in enumerate(cards):
+        if _card_has_flag_type(card, "on_request"):
+            continue
+        rating = _card_rating_value(card)
+        price = _coerce_int(card.get("price"), default=max_price) or max_price
+        norm_price = price / max_price if max_price else 1.0
+        score = rating - norm_price * 1.4
+        optimum_scores.append((score, idx))
+    optimum_scores.sort(reverse=True)
+    used_indices = {budget_idx, premium_idx} - {None}
+    for _, idx in optimum_scores:
+        if idx not in used_indices:
+            optimum_idx = idx
+            break
+
+    def _prepend_flag(card: Dict[str, Any], flag: CardFlag) -> None:
+        flags = list(card.get("flags") or [])
+        flags.insert(0, flag)
+        card["flags"] = flags
+
+    if budget_idx is not None and budget_idx not in {premium_idx, optimum_idx}:
+        _prepend_flag(cards[budget_idx], {
+            "type": "recommend_budget",
+            "severity": "recommend",
+            "label": "💰 Дешевле",
+        })
+    if optimum_idx is not None and optimum_idx != premium_idx:
+        _prepend_flag(cards[optimum_idx], {
+            "type": "recommend_optimum",
+            "severity": "recommend",
+            "label": "🥇 Лучший вариант",
+        })
+    if premium_idx is not None:
+        _prepend_flag(cards[premium_idx], {
+            "type": "recommend_premium",
+            "severity": "recommend",
+            "label": "💎 Премиум",
+        })
+
+    # ── Match-флаги по профилю клиента ───────────────────────────────
+    family = _is_family_profile(client_profile)
+    couple = _is_couple_profile(client_profile)
+
+    if family:
+        # Для семьи: ≥4*, не kid_unfriendly, не night_flight, не on_request,
+        # не far_sea. Берём top-2 по rating.
+        candidates = []
+        for idx, card in enumerate(cards):
+            stars = _coerce_int(card.get("hotel_stars"), default=0)
+            if stars < 4:
+                continue
+            if any(
+                _card_has_flag_type(card, t)
+                for t in ("kid_unfriendly", "night_flight", "on_request", "far_sea")
+            ):
+                continue
+            candidates.append((idx, _card_rating_value(card)))
+        candidates.sort(key=lambda x: -x[1])
+        for idx, _ in candidates[:2]:
+            _prepend_flag(cards[idx], {
+                "type": "match_family",
+                "severity": "match",
+                "label": "👨‍👩‍👧 Для семьи",
+            })
+
+    if couple:
+        # Для пары: ≥4*, не on_request, не far_sea, не not_quiet (если он есть).
+        candidates = []
+        for idx, card in enumerate(cards):
+            stars = _coerce_int(card.get("hotel_stars"), default=0)
+            if stars < 4:
+                continue
+            if any(
+                _card_has_flag_type(card, t)
+                for t in ("on_request", "far_sea", "not_quiet")
+            ):
+                continue
+            candidates.append((idx, _card_rating_value(card)))
+        candidates.sort(key=lambda x: -x[1])
+        for idx, _ in candidates[:2]:
+            _prepend_flag(cards[idx], {
+                "type": "match_couple",
+                "severity": "match",
+                "label": "💕 Для пары",
+            })
+
+
 def _hotel_to_card(
     hotel: Dict[str, Any],
     position: int,
@@ -1877,6 +2264,7 @@ def _demo_search(args: Dict[str, Any], session: CopilotSession) -> Dict[str, Any
     cards = [demo_hotel_to_card(hotel, idx + 1) for idx, hotel in enumerate(selected)]
     for card in cards:
         card["flags"] = _compute_card_flags(card, session.client_profile)
+    _apply_recommendation_flags(cards, session.client_profile)
     request_id = f"demo-{uuid.uuid4().hex[:8]}"
     session.last_search_request_id = request_id
     session.last_search_params = dict(args)
@@ -2093,6 +2481,7 @@ async def _tool_get_search_results(client: TourVisorClient, args: Dict[str, Any]
         card = _hotel_to_card(hotel, idx + 1, client_profile=session.client_profile)
         if card:
             cards.append(card)
+    _apply_recommendation_flags(cards, session.client_profile)
     session.last_cards = cards
     session.turn_pending_cards = list(cards)
     session.turn_intent = "new_search"
@@ -2111,26 +2500,31 @@ async def _tool_get_search_results(client: TourVisorClient, args: Dict[str, Any]
 _HOTEL_INFO_TTL_SEC = 30 * 60  # 30 минут — описание отеля живёт долго
 
 
-async def _tool_get_hotel_info(client: TourVisorClient, args: Dict[str, Any], session: CopilotSession) -> Dict[str, Any]:
-    code = _coerce_int(args.get("hotelcode"))
-    if not code:
-        return {"error": "no_hotel_code"}
-    # ВАЖНО: get_hotel_info НЕ трогает session.turn_pending_cards и session.last_cards.
-    # После этого вызова frontend получит tour_cards=[], правая панель сохранит
-    # выдачу из последнего search_tours/get_hot_tours, а в чате под ответом ассистента
-    # карточек НЕ будет (это и решает баг «после вопроса про отель снова те же карточки»).
-    session.turn_intent = "hotel_info"
+async def _fetch_hotel_info_cached(
+    client: TourVisorClient,
+    session: CopilotSession,
+    hotel_code: int,
+    *,
+    big_images: bool = False,
+    include_reviews: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Cache-aware fetch для hotel.php. БЕЗ квот, без побочных эффектов на turn_intent.
 
-    cached = _cache_get(session.hotel_info_cache, str(code), _HOTEL_INFO_TTL_SEC)
+    Используется как `_tool_get_hotel_info`'ом (через delegation), так и compare-prefetch
+    в _run_agent. Возвращает payload в том же формате, что отдаёт инструмент LLM.
+    """
+    if not hotel_code:
+        return None
+    cached = _cache_get(session.hotel_info_cache, str(hotel_code), _HOTEL_INFO_TTL_SEC)
     if cached is not None:
         return {**cached, "_cache_hit": True}
 
     if not _has_tourvisor_credentials():
         for hotel in DEMO_HOTELS:
-            if hotel["hotel_code"] == code:
+            if hotel.get("hotel_code") == hotel_code:
                 front = demo_hotel_to_info(hotel)
                 payload = {
-                    "hotelcode": code,
+                    "hotelcode": hotel_code,
                     "name": front["name"],
                     "stars": front["stars"],
                     "rating": front["rating"],
@@ -2144,18 +2538,24 @@ async def _tool_get_hotel_info(client: TourVisorClient, args: Dict[str, Any], se
                     "first_image": (front["images"][0] if front["images"] else None),
                     "mode": "demo",
                 }
-                _cache_put(session.hotel_info_cache, str(code), payload)
+                _cache_put(session.hotel_info_cache, str(hotel_code), payload)
                 return payload
-        return {"error": "demo_hotel_not_found", "hotelcode": code}
-    hotel = await client.get_hotel_info(
-        hotel_code=code,
-        big_images=bool(_coerce_int(args.get("imgbig"))),
-        remove_tags=bool(_coerce_int(args.get("removetags"), default=1)),
-        include_reviews=bool(_coerce_int(args.get("reviews"))),
-    )
+        return None
+
+    try:
+        hotel = await client.get_hotel_info(
+            hotel_code=hotel_code,
+            big_images=big_images,
+            remove_tags=True,
+            include_reviews=include_reviews,
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("[%s] hotel_info fetch failed for %s", session.id, hotel_code)
+        return None
+
     front = _hotel_info_to_frontend(hotel)
     payload = {
-        "hotelcode": code,
+        "hotelcode": hotel_code,
         "name": front["name"],
         "stars": front["stars"],
         "rating": front["rating"],
@@ -2168,7 +2568,31 @@ async def _tool_get_hotel_info(client: TourVisorClient, args: Dict[str, Any], se
         "images_count": front["images_count"],
         "first_image": (front["images"][0] if front["images"] else None),
     }
-    _cache_put(session.hotel_info_cache, str(code), payload)
+    _cache_put(session.hotel_info_cache, str(hotel_code), payload)
+    return payload
+
+
+async def _tool_get_hotel_info(client: TourVisorClient, args: Dict[str, Any], session: CopilotSession) -> Dict[str, Any]:
+    code = _coerce_int(args.get("hotelcode"))
+    if not code:
+        return {"error": "no_hotel_code"}
+    # ВАЖНО: get_hotel_info НЕ трогает session.turn_pending_cards и session.last_cards.
+    # После этого вызова frontend получит tour_cards=[], правая панель сохранит
+    # выдачу из последнего search_tours/get_hot_tours, а в чате под ответом ассистента
+    # карточек НЕ будет (это и решает баг «после вопроса про отель снова те же карточки»).
+    session.turn_intent = "hotel_info"
+
+    payload = await _fetch_hotel_info_cached(
+        client,
+        session,
+        code,
+        big_images=bool(_coerce_int(args.get("imgbig"))),
+        include_reviews=bool(_coerce_int(args.get("reviews"))),
+    )
+    if payload is None:
+        if not _has_tourvisor_credentials():
+            return {"error": "demo_hotel_not_found", "hotelcode": code}
+        return {"error": "tourvisor_error", "hotelcode": code, "message": "Не удалось загрузить карточку отеля."}
     return payload
 
 
@@ -2239,6 +2663,7 @@ async def _tool_get_hot_tours(client: TourVisorClient, args: Dict[str, Any], ses
             card["price"] = int(card["price"] * 0.8)
             card["flags"] = _compute_card_flags(card, session.client_profile)
             cards.append(card)
+        _apply_recommendation_flags(cards, session.client_profile)
         session.last_cards = cards
         session.turn_pending_cards = list(cards)
         session.turn_intent = "hot_tours"
@@ -2284,6 +2709,7 @@ async def _tool_get_hot_tours(client: TourVisorClient, args: Dict[str, Any], ses
         for idx, item in enumerate(items[:8])
         if isinstance(item, dict)
     ]
+    _apply_recommendation_flags(cards, session.client_profile)
     session.last_cards = cards
     session.turn_pending_cards = list(cards)
     session.turn_intent = "hot_tours"
@@ -2405,6 +2831,305 @@ def _not_included_compact(payload: Dict[str, Any]) -> List[str]:
     return out
 
 
+async def _fetch_tour_details_cached(
+    client: TourVisorClient,
+    session: CopilotSession,
+    tour_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Cache-aware fetch для actdetail.php. БЕЗ квот.
+
+    Используется и инструментом LLM, и compare-prefetch. Возвращает payload в том
+    же compact-формате; либо None если данных нет / запрос не удался / demo.
+    Ошибки `tour_id_expired` НЕ выбрасывают исключение — возвращают dict с
+    `error` для прозрачности на стороне вызывающего кода.
+    """
+    if not tour_id:
+        return None
+    cached = _cache_get(session.tour_details_cache, tour_id, _TOUR_DETAILS_TTL_SEC)
+    if cached:
+        return {**cached, "_cache_hit": True}
+
+    if not _has_tourvisor_credentials() or tour_id.startswith(("demo-", "tv-", "hot-")):
+        return None
+
+    try:
+        raw = await client.get_tour_details(tour_id=tour_id)
+    except TourIdExpiredError as exc:
+        return {
+            "error": "tour_id_expired",
+            "tourid": tour_id,
+            "message": (
+                str(exc)
+                or "Данные тура устарели. Нужен новый поиск с теми же параметрами."
+            ),
+        }
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("[%s] tour_details fetch failed for %s", session.id, tour_id)
+        return None
+
+    flights_payload = _flights_to_frontend(raw)
+    flights_list = flights_payload.get("flights") or []
+    default_flight = next((f for f in flights_list if f.get("is_default")), None) or (
+        flights_list[0] if flights_list else None
+    )
+
+    flight_forward: Dict[str, Any] = {}
+    flight_backward: Dict[str, Any] = {}
+    night_flight = False
+    fuel_charge = 0
+    if default_flight:
+        flight_forward = _segments_to_compact(default_flight.get("forward") or [])
+        flight_backward = _segments_to_compact(default_flight.get("backward") or [])
+        fuel_charge = _coerce_int(default_flight.get("fuel_charge")) or 0
+        dep_time = (flight_forward.get("dep_time") or "").strip()
+        try:
+            hour = int(dep_time.split(":")[0]) if dep_time else -1
+            night_flight = hour >= 23 or 0 <= hour <= 5
+        except ValueError:
+            night_flight = False
+
+    inner = raw.get("data") if isinstance(raw, dict) and isinstance(raw.get("data"), dict) else raw
+
+    compact = {
+        "tourid": tour_id,
+        "flights_count": len(flights_list),
+        "flight_forward": flight_forward,
+        "flight_backward": flight_backward,
+        "fuel_charge": fuel_charge,
+        "night_flight": bool(night_flight),
+        "addpayments": _addpayments_compact(inner or {}),
+        "not_included": _not_included_compact(inner or {}),
+    }
+    _cache_put(session.tour_details_cache, tour_id, compact)
+    return compact
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Compare-prefetch (§7.5.1).
+#
+# Идея: когда агент пишет «сравни первый и второй / 1 vs 3 / что лучше — A или B»,
+# backend ДО LLM вызывает get_hotel_info + get_tour_details для всех 2-3 целей
+# (с использованием кэша) и инжектит готовый блок [ДАННЫЕ ДЛЯ СРАВНЕНИЯ] в
+# историю как system message. LLM тогда генерирует сравнение по этим фактам и
+# не делает лишних tool-вызовов (что важно: details лимитированы 1/ход).
+#
+# Сравнение покрывает 6 измерений:
+#   1) локация (страна/курорт, расстояние до моря)
+#   2) отель (категория, рейтинг, описание)
+#   3) пляж и инфраструктура (тип пляжа, услуги, бассейны)
+#   4) питание (концепция, описание meallist)
+#   5) семья/пара (информация для детей, флаги kid_unfriendly/not_quiet)
+#   6) цена/качество (общая цена тура, ₽/ночь, ₽/звезда, доплаты, fuel_charge)
+#   7) перелёт (авиакомпания, стыковки, время, ночной/дневной, багаж)
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def _prefetch_compare_data(
+    session: CopilotSession,
+    targets: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Подгрузить hotel_info + tour_details для каждой compare-цели.
+
+    Возвращает list parallel к `targets`: [{card, hotel_info, tour_details}, ...].
+    Кэш используется агрессивно — повторное сравнение тех же отелей не делает
+    новых HTTP-вызовов в TourVisor. Если TourVisor недоступен (demo / нет
+    ключей) — hotel_info/tour_details будут None, sample LLM получит только
+    card-level факты + честную пометку «не указано в данных».
+    """
+    if not targets:
+        return []
+
+    client = TourVisorClient()
+    enriched: List[Dict[str, Any]] = []
+    try:
+        for card in targets:
+            entry: Dict[str, Any] = {"card": card, "hotel_info": None, "tour_details": None}
+            hotel_code = _coerce_int(card.get("hotel_code"))
+            tour_id = _coerce_str(card.get("tour_id"))
+            if hotel_code:
+                entry["hotel_info"] = await _fetch_hotel_info_cached(
+                    client, session, hotel_code,
+                )
+            if tour_id:
+                td = await _fetch_tour_details_cached(client, session, tour_id)
+                # tour_id_expired → не падаем, просто оставляем None
+                if td and not td.get("error"):
+                    entry["tour_details"] = td
+            enriched.append(entry)
+    finally:
+        await client.close()
+    return enriched
+
+
+def _flag_labels(card: Dict[str, Any]) -> str:
+    """Короткая выжимка по флагам карточки (kid_unfriendly / night_flight / на запрос)."""
+    flags = card.get("flags") or []
+    labels: List[str] = []
+    for f in flags:
+        if not isinstance(f, dict):
+            continue
+        label = _coerce_str(f.get("label")) or _coerce_str(f.get("type"))
+        if label:
+            labels.append(label)
+    return ", ".join(labels)
+
+
+def _per_night_price(card: Dict[str, Any]) -> Optional[int]:
+    price = _coerce_int(card.get("price"))
+    nights = _coerce_int(card.get("nights"))
+    if not price or not nights or nights <= 0:
+        return None
+    return int(price / nights)
+
+
+def _per_star_price(card: Dict[str, Any]) -> Optional[int]:
+    price = _coerce_int(card.get("price"))
+    stars = _coerce_int(card.get("hotel_stars"))
+    if not price or not stars:
+        return None
+    return int(price / stars)
+
+
+def _format_compare_facts(
+    enriched: List[Dict[str, Any]],
+    *,
+    client_profile: Optional[str] = None,
+    user_message: str = "",
+) -> str:
+    """Сформировать system-сообщение `[ДАННЫЕ ДЛЯ СРАВНЕНИЯ]` для LLM.
+
+    Всё компактно (≤ ~1.5K токенов), факт-к-факту, с явными метками отсутствия
+    данных. LLM по этим фактам должен сгенерировать ответ по жёсткому формату
+    §7.5.1.
+    """
+    lines = [
+        "[ДАННЫЕ ДЛЯ СРАВНЕНИЯ — используй ИХ как единственный источник фактов.",
+        "Не вызывай get_hotel_info / get_tour_details повторно по этим турам.",
+        "Если факта нет ниже — пиши «не указано в данных», ничего не выдумывай.",
+        "Формат ответа — §7.5.1 (Сравнительный анализ ТУРА), вердикт обязателен.]",
+    ]
+    if client_profile:
+        lines.append(f"\n[ПРОФИЛЬ КЛИЕНТА]: {client_profile}")
+    if user_message:
+        # Дублируем последний запрос, чтобы LLM держал контекст «что именно сравнивать»
+        snippet = user_message.strip()
+        if len(snippet) > 240:
+            snippet = snippet[:240] + "…"
+        lines.append(f"[ЗАПРОС АГЕНТА]: {snippet}")
+
+    for idx, entry in enumerate(enriched):
+        card = entry.get("card") or {}
+        info = entry.get("hotel_info") or {}
+        details = entry.get("tour_details") or {}
+
+        label = chr(ord("A") + idx)  # A / B / C
+        name = _coerce_str(card.get("hotel_name")) or f"Вариант {idx+1}"
+        country = _coerce_str(card.get("country")) or _coerce_str(info.get("country")) or "—"
+        resort = _coerce_str(card.get("resort")) or _coerce_str(info.get("region")) or "—"
+        stars = _coerce_int(card.get("hotel_stars")) or _coerce_int(info.get("stars")) or 0
+        rating = _coerce_str(card.get("hotel_rating")) or _coerce_str(info.get("rating")) or "—"
+        meal = _coerce_str(card.get("meal_description")) or _coerce_str(info.get("meallist")) or "—"
+        price = _coerce_int(card.get("price"))
+        currency = _coerce_str(card.get("currency")) or "RUB"
+        nights = _coerce_int(card.get("nights"))
+        date_from = _coerce_str(card.get("date_from"))
+        date_to = _coerce_str(card.get("date_to"))
+        operator = _coerce_str(card.get("operator")) or "—"
+        sea = _coerce_str(card.get("sea_distance")) or "не указано"
+        on_request = bool(card.get("on_request"))
+        per_night = _per_night_price(card)
+        per_star = _per_star_price(card)
+
+        lines.append(f"\n=== ВАРИАНТ {label} (поз. {idx+1}): {name} ===")
+        lines.append(f"  Локация: {country} / {resort}; до моря: {sea}.")
+        lines.append(f"  Категория и рейтинг: {stars}★, рейтинг {rating}.")
+        date_str = f"{date_from}" + (f" – {date_to}" if date_to else "")
+        lines.append(
+            f"  Цена тура: {price} {currency} за {nights} ночей "
+            f"(≈ {per_night or '—'} {currency}/ночь, ≈ {per_star or '—'} {currency}/звезда); даты {date_str or '—'}; оператор {operator}."
+        )
+        lines.append(f"  Питание (карточка): {meal}.")
+        if on_request:
+            lines.append("  Статус: ⚠️ ПОД ЗАПРОС — нужно подтверждение оператора.")
+        flag_str = _flag_labels(card)
+        if flag_str:
+            lines.append(f"  Флаги риска: {flag_str}.")
+
+        if info:
+            beach = _coerce_str(info.get("beach"))
+            child = _coerce_str(info.get("child"))
+            description = _coerce_str(info.get("description"))
+            meallist = _coerce_str(info.get("meallist"))
+            if beach:
+                lines.append(f"  Пляж (TourVisor): {beach[:280]}")
+            if child:
+                lines.append(f"  Для детей (TourVisor): {child[:240]}")
+            if description and description != beach:
+                lines.append(f"  Описание (фрагмент): {description[:240]}")
+            if meallist and meallist != meal:
+                lines.append(f"  Питание (TourVisor): {meallist[:200]}")
+        else:
+            lines.append("  Пляж/дети/описание: не загружено (карточка отеля недоступна).")
+
+        if details:
+            ff = details.get("flight_forward") or {}
+            fb = details.get("flight_backward") or {}
+            fuel = _coerce_int(details.get("fuel_charge"))
+            night = bool(details.get("night_flight"))
+            addpayments = details.get("addpayments") or []
+            not_included = details.get("not_included") or []
+            if ff:
+                airline = ff.get("airline") or "—"
+                stops = ff.get("stops") or 0
+                stops_str = "прямой" if stops == 0 else f"{stops} пересадк{'а' if stops == 1 else 'и'}"
+                bag = ff.get("baggage") or "—"
+                lines.append(
+                    f"  Перелёт туда: {airline}, {ff.get('dep_time') or '—'} {ff.get('dep_airport') or ''} → "
+                    f"{ff.get('arr_time') or '—'} {ff.get('arr_airport') or ''}, {stops_str}; багаж: {bag}."
+                    + (" ⚠️ НОЧНОЙ ВЫЛЕТ." if night else "")
+                )
+            if fb:
+                stops_b = fb.get("stops") or 0
+                stops_b_str = "прямой" if stops_b == 0 else f"{stops_b} пересадк{'а' if stops_b == 1 else 'и'}"
+                lines.append(
+                    f"  Перелёт обратно: {fb.get('airline') or '—'}, "
+                    f"{fb.get('dep_time') or '—'} {fb.get('dep_airport') or ''} → "
+                    f"{fb.get('arr_time') or '—'} {fb.get('arr_airport') or ''}, {stops_b_str}."
+                )
+            if fuel:
+                lines.append(f"  Топливный сбор: {fuel} ₽ (вне общей цены тура).")
+            if addpayments:
+                ap = "; ".join(
+                    f"{p['name']} {p['amount']} {p['currency']}{' (обяз.)' if p.get('mandatory') else ''}"
+                    for p in addpayments[:4]
+                )
+                lines.append(f"  Доплаты (оператор): {ap}.")
+            if not_included:
+                lines.append(f"  НЕ включено в цену: {', '.join(not_included)}.")
+        else:
+            lines.append("  Перелёт/доплаты: данные не загружены (нет details).")
+
+    # Подсказки по сравнению цена/качество
+    prices = [(_coerce_int(e["card"].get("price")) or 0) for e in enriched]
+    if all(prices) and len(prices) >= 2:
+        cheapest = min(range(len(prices)), key=lambda i: prices[i])
+        priciest = max(range(len(prices)), key=lambda i: prices[i])
+        if cheapest != priciest:
+            delta = prices[priciest] - prices[cheapest]
+            lines.append(
+                f"\n[АРИФМЕТИКА]: дешевле всего вариант "
+                f"{chr(ord('A')+cheapest)} (на {delta:,} ₽ ниже самого дорогого {chr(ord('A')+priciest)})."
+                .replace(",", " ")
+            )
+
+    lines.append(
+        "\n[НАПОМИНАНИЕ]: не пиши описание одного отеля — нужен СТРОГИЙ сравнительный анализ "
+        "по §7.5.1 (заголовок → сводки → 6 строк-параметров → 'Кому подойдёт' → 'Мой выбор'). "
+        "Если каких-то данных нет — пиши «не указано», но НЕ пропускай строку."
+    )
+    return "\n".join(lines)
+
+
 async def _tool_get_tour_details(
     client: TourVisorClient, args: Dict[str, Any], session: CopilotSession
 ) -> Dict[str, Any]:
@@ -2427,68 +3152,19 @@ async def _tool_get_tour_details(
     session.tools_used_this_turn["get_tour_details"] = used + 1
     session.turn_intent = "tour_details"
 
-    cached = _cache_get(session.tour_details_cache, tour_id, _TOUR_DETAILS_TTL_SEC)
-    if cached:
-        return {**cached, "_cache_hit": True}
-
-    if not _has_tourvisor_credentials():
-        return {
-            "tourid": tour_id,
-            "mode": "demo",
-            "message": (
-                "Tourvisor не подключён — детали тура недоступны в демо-режиме. "
-                "Подключите ключи, чтобы видеть рейсы и доплаты."
-            ),
-        }
-
-    try:
-        raw = await client.get_tour_details(tour_id=tour_id)
-    except TourIdExpiredError as exc:
-        return {
-            "error": "tour_id_expired",
-            "tourid": tour_id,
-            "message": (
-                str(exc)
-                or "Данные тура устарели. Нужен новый поиск с теми же параметрами."
-            ),
-        }
-
-    flights_payload = _flights_to_frontend(raw)
-    flights_list = flights_payload.get("flights") or []
-    default_flight = next((f for f in flights_list if f.get("is_default")), None) or (
-        flights_list[0] if flights_list else None
-    )
-
-    flight_forward: Dict[str, Any] = {}
-    flight_backward: Dict[str, Any] = {}
-    night_flight = False
-    fuel_charge = 0
-    if default_flight:
-        flight_forward = _segments_to_compact(default_flight.get("forward") or [])
-        flight_backward = _segments_to_compact(default_flight.get("backward") or [])
-        fuel_charge = _coerce_int(default_flight.get("fuel_charge")) or 0
-        # Признак ночного перелёта: вылет туда между 23:00 и 05:59.
-        dep_time = (flight_forward.get("dep_time") or "").strip()
-        try:
-            hour = int(dep_time.split(":")[0]) if dep_time else -1
-            night_flight = hour >= 23 or 0 <= hour <= 5
-        except ValueError:
-            night_flight = False
-
-    inner = raw.get("data") if isinstance(raw, dict) and isinstance(raw.get("data"), dict) else raw
-
-    compact = {
-        "tourid": tour_id,
-        "flights_count": len(flights_list),
-        "flight_forward": flight_forward,
-        "flight_backward": flight_backward,
-        "fuel_charge": fuel_charge,
-        "night_flight": bool(night_flight),
-        "addpayments": _addpayments_compact(inner or {}),
-        "not_included": _not_included_compact(inner or {}),
-    }
-    _cache_put(session.tour_details_cache, tour_id, compact)
-    return compact
+    payload = await _fetch_tour_details_cached(client, session, tour_id)
+    if payload is None:
+        if not _has_tourvisor_credentials():
+            return {
+                "tourid": tour_id,
+                "mode": "demo",
+                "message": (
+                    "Tourvisor не подключён — детали тура недоступны в демо-режиме. "
+                    "Подключите ключи, чтобы видеть рейсы и доплаты."
+                ),
+            }
+        return {"error": "tourvisor_error", "tourid": tour_id}
+    return payload
 
 
 async def _tool_actualize_tour(
@@ -2650,7 +3326,7 @@ async def _tool_build_collection(
     _purge_expired_collections()
 
     collection_id = uuid.uuid4().hex[:12]
-    COLLECTIONS[collection_id] = {
+    payload = {
         "id": collection_id,
         "created_ts": time.time(),
         "cards": cards_payload,
@@ -2658,6 +3334,8 @@ async def _tool_build_collection(
         "agent_note": agent_note,
         "client_profile": session.client_profile,
     }
+    COLLECTIONS[collection_id] = payload
+    _persist_collection(collection_id, payload)
 
     base_url = (request.host_url or "http://127.0.0.1:8080/").rstrip("/")
     share_url = f"{base_url}/share/{collection_id}"
@@ -2679,6 +3357,81 @@ async def _tool_build_collection(
         "title": title,
     }
     return response
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Country memos (итерация 5).
+#
+# Загружаются один раз из backend/data/country_memos.json.
+# Используются:
+#   1) tool `get_country_memo` для LLM (когда агент спрашивает
+#      «расскажи про Турцию» / «что нужно знать клиенту перед поездкой»);
+#   2) endpoint GET /api/copilot/country-memos для UI-вкладки «Памятки».
+# ──────────────────────────────────────────────────────────────────────
+
+
+_COUNTRY_MEMOS_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _load_country_memos() -> Dict[str, Any]:
+    global _COUNTRY_MEMOS_CACHE
+    if _COUNTRY_MEMOS_CACHE is not None:
+        return _COUNTRY_MEMOS_CACHE
+    path = os.path.join(os.path.dirname(__file__), "data", "country_memos.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            _COUNTRY_MEMOS_CACHE = json.load(f)
+    except FileNotFoundError:
+        logger.error("country_memos.json not found at %s", path)
+        _COUNTRY_MEMOS_CACHE = {}
+    except json.JSONDecodeError as exc:
+        logger.error("country_memos.json malformed: %s", exc)
+        _COUNTRY_MEMOS_CACHE = {}
+    return _COUNTRY_MEMOS_CACHE
+
+
+def _find_country_memo(query: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Поиск памятки по точному имени / slug / подстроке (case-insensitive)."""
+    if not query:
+        return None
+    memos = _load_country_memos()
+    if not memos:
+        return None
+    q = query.strip()
+    if q in memos:
+        return q, memos[q]
+    q_lower = q.lower()
+    for name, data in memos.items():
+        if name.lower() == q_lower:
+            return name, data
+        if (data.get("slug") or "").lower() == q_lower:
+            return name, data
+    for name, data in memos.items():
+        if q_lower in name.lower() or name.lower() in q_lower:
+            return name, data
+    return None
+
+
+async def _tool_get_country_memo(
+    _client: TourVisorClient,
+    args: Dict[str, Any],
+    _session: CopilotSession,
+) -> Dict[str, Any]:
+    """Возвращает агенту памятку по стране (виза, валюта, советы, FAQ).
+    Используется когда агент готовит клиента к поездке или хочет
+    собрать пост-продажную полезную информацию."""
+    raw = args.get("country") or args.get("name") or args.get("query")
+    found = _find_country_memo(_coerce_str(raw))
+    if not found:
+        return {
+            "error": "memo_not_found",
+            "message": (
+                "Памятка по этой стране пока не подготовлена. Доступные: "
+                + ", ".join(_load_country_memos().keys())
+            ),
+        }
+    name, data = found
+    return {"country": name, **data}
 
 
 def _tool_current_date(_client, _args, _session) -> Dict[str, Any]:
@@ -2709,6 +3462,7 @@ TOOL_DISPATCH: Dict[str, ToolFn] = {
     "get_tour_details": _tool_get_tour_details,
     "actualize_tour": _tool_actualize_tour,
     "build_collection": _tool_build_collection,
+    "get_country_memo": _tool_get_country_memo,
 }
 
 
@@ -2912,6 +3666,69 @@ def _run_demo_agent(session: CopilotSession, user_message: str) -> Dict[str, Any
     }
 
 
+def _dehydrate_image_history(session: CopilotSession) -> None:
+    """Безопасный fallback: заменяет image_url-content в user-сообщениях
+    на короткий плейсхолдер. Используется если по какой-то причине _run_agent
+    не успел вызвать `_dehydrate_image_history_with_summary`."""
+    for msg in session.history:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        text_parts: List[str] = []
+        image_count = 0
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                text_parts.append(str(part.get("text") or ""))
+            elif part.get("type") == "image_url":
+                image_count += 1
+        if image_count == 0:
+            continue
+        joined = " ".join(t for t in text_parts if t).strip()
+        suffix = f" [приложено изображений: {image_count} — содержимое уже учтено LLM выше]"
+        msg["content"] = (joined + suffix).strip()
+
+
+def _dehydrate_image_history_with_summary(
+    session: CopilotSession, assistant_summary: str
+) -> None:
+    """То же что `_dehydrate_image_history`, но в плейсхолдер вшивается ТЗ
+    из ответа ассистента. Это нужно, чтобы `_user_messages_from_history`
+    на следующих ходах видел в user-тексте слова «Турция/Москва/семья»
+    и не блокировал search_tours по cascade-проверке."""
+    summary = (assistant_summary or "").strip()
+    for msg in session.history:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        text_parts: List[str] = []
+        image_count = 0
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                text_parts.append(str(part.get("text") or ""))
+            elif part.get("type") == "image_url":
+                image_count += 1
+        if image_count == 0:
+            continue
+        joined = " ".join(t for t in text_parts if t).strip()
+        if summary:
+            new_content = (
+                f"{joined}\n[Из приложенного скриншота: {summary}]"
+            ).strip()
+        else:
+            new_content = (
+                f"{joined} [приложено изображений: {image_count}]"
+            ).strip()
+        msg["content"] = new_content
+
+
 def _compact_history(history: List[Dict[str, Any]], keep_last_tool_results: int = 4) -> None:
     """Trim oversized tool results from older turns to keep prompt compact.
 
@@ -2939,10 +3756,17 @@ def _compact_history(history: List[Dict[str, Any]], keep_last_tool_results: int 
     # Сейчас обрезаем только tool-messages, так что user-history остаётся полной.
 
 
-async def _run_agent(session: CopilotSession, user_message: str) -> Dict[str, Any]:
+async def _run_agent(
+    session: CopilotSession,
+    user_message: str,
+    images: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     # Сбрасываем состояние ТЕКУЩЕГО хода до любого ветвления (demo или live):
     # это критично для бага с дублирующимися карточками.
     session.reset_turn_state()
+    images = [u for u in (images or []) if isinstance(u, str) and u.strip()][:4]
+    # Триггеры профиля и ловушки слотов работают только по тексту;
+    # vision-контент LLM сам распарсит и при необходимости переспросит.
     _update_collected_slots(session, user_message)
     session.client_profile = _extract_client_profile_hint(user_message, session.client_profile)
     session.allow_service_ids_this_turn = _wants_service_ids(user_message)
@@ -2976,11 +3800,73 @@ async def _run_agent(session: CopilotSession, user_message: str) -> Dict[str, An
                 "Это подсказка, не догма. Если агент явно отменил пункт — игнорируй его на этот ход."
             ),
         })
-    session.history.append({"role": "user", "content": user_message})
+
+    # Multimodal user message: если turn принёс images (скриншот переписки,
+    # фото из чата), формируем content-массив в формате OpenAI/OpenRouter.
+    # Текст без картинок остаётся плоской строкой (быстрее, дешевле, проще
+    # обрабатывает _compact_history).
+    if images:
+        message_for_llm = user_message or "[Прикреплён(ы) скриншот(ы) переписки клиента — собери ТЗ.]"
+        multimodal_content: List[Dict[str, Any]] = [
+            {"type": "text", "text": message_for_llm}
+        ]
+        for url in images:
+            multimodal_content.append(
+                {"type": "image_url", "image_url": {"url": url}}
+            )
+        session.history.append({"role": "user", "content": multimodal_content})
+        # Маркер для подсказки модели: §0.7 ниже распарсит и применит правила
+        # «скриншот переписки → ТЗ без поиска».
+        session.history.append({
+            "role": "system",
+            "content": (
+                "[VISION-ВХОД] Пользователь приложил изображение(я). Вероятно — "
+                "переписка с клиентом или скриншот мессенджера. Извлеки факты "
+                "(направление, даты, состав, бюджет, требования) и собери "
+                "короткое ТЗ. Tools НЕ вызывай, пока агент не подтвердит "
+                "выжимку и не попросит запустить поиск."
+            ),
+        })
+    else:
+        session.history.append({"role": "user", "content": user_message})
 
     direct_hotel_response = await _try_direct_hotel_info_followup(session, user_message)
     if direct_hotel_response is not None:
         return direct_hotel_response
+
+    # ── Compare-prefetch (§7.5.1) ────────────────────────────────────
+    # Если сообщение похоже на сравнение и в last_cards есть ≥2 целей —
+    # подгружаем hotel_info + tour_details параллельно для каждой цели и
+    # инжектим готовый блок [ДАННЫЕ ДЛЯ СРАВНЕНИЯ] в историю до LLM-цикла.
+    # Это закрывает баг «ассистент описывает один отель вместо сравнения»
+    # и делает анализ полноценным (включая локацию, цену/качество, перелёт).
+    if _is_compare_request(user_message) and session.last_cards:
+        compare_targets = _extract_compare_targets(
+            user_message, session.last_cards, max_targets=3,
+        )
+        if len(compare_targets) >= 2:
+            logger.info(
+                "[%s] compare-prefetch: %d targets (%s)",
+                session.id,
+                len(compare_targets),
+                [c.get("hotel_name") for c in compare_targets],
+            )
+            try:
+                enriched = await _prefetch_compare_data(session, compare_targets)
+                facts_block = _format_compare_facts(
+                    enriched,
+                    client_profile=session.client_profile,
+                    user_message=user_message,
+                )
+                session.history.append({"role": "system", "content": facts_block})
+                session.turn_intent = "compare"
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("[%s] compare-prefetch failed", session.id)
+        else:
+            logger.info(
+                "[%s] compare-intent detected but <2 targets — let LLM ask for clarification",
+                session.id,
+            )
 
     tools = _openai_tools()
     final_text = ""
@@ -3097,8 +3983,53 @@ async def _run_agent(session: CopilotSession, user_message: str) -> Dict[str, An
                 )
             continue
 
+        raw_reply = msg.content or ""
+        # Защита §0.1 «Действия — ДЕЛАЙ, не описывай».
+        # Если LLM вернул финальный текст БЕЗ tool_call, но в тексте есть
+        # признаки stall-преамбулы («Запустил поиск», «Хотите, чтобы я
+        # вывел результаты», «Сейчас подберу топ-3» и т.п.), — это прямое
+        # нарушение системного промпта и галлюцинация действия. Форсируем
+        # до двух корректирующих ходов: добавляем в историю system-reminder,
+        # отбрасываем «фейковый» assistant-ответ и повторяем шаг.
+        stall_hits = _detect_stall_preamble(raw_reply)
+        current_retries = session.stall_retries_this_turn
+        if stall_hits and current_retries < 2:
+            session.stall_retries_this_turn = current_retries + 1
+            logger.warning(
+                "[%s] stall-preamble detected at step %d (retry %d/2): %s",
+                session.id,
+                step,
+                session.stall_retries_this_turn,
+                stall_hits[:3],
+            )
+            session.history.append({
+                "role": "system",
+                "content": (
+                    "[НАРУШЕНИЕ §0.1 — ПОВТОРИ ХОД ПРАВИЛЬНО]\n"
+                    f"Ты написал: «{raw_reply.strip()[:180]}». "
+                    "Это описание действия без реального вызова инструмента — "
+                    "прямое нарушение §0.1 «Действия — ДЕЛАЙ, не описывай».\n"
+                    "Правило: если данные собраны — СРАЗУ вызывай нужный tool "
+                    "(search_tours / get_search_results / get_hot_tours / "
+                    "get_hotel_info / get_tour_details / actualize_tour / "
+                    "build_collection). НЕ пиши «Запустил поиск», «Сейчас "
+                    "подберу», «Хотите, чтобы я вывел результаты», «подобрать "
+                    "топ-N» и подобные фразы. Не задавай лишний вопрос «выводить "
+                    "результаты или нет» — если слоты §3 собраны, просто запускай "
+                    "поиск и показывай результаты.\n"
+                    "ПОВТОРИ ход корректно: либо tool_call, либо финальный "
+                    "ответ БЕЗ описания действий и без лишних подтверждений."
+                ),
+            })
+            continue
+        if stall_hits:
+            logger.warning(
+                "[%s] stall-preamble persisted after retries; letting through: %s",
+                session.id,
+                stall_hits[:3],
+            )
         final_text = _sanitize_agent_reply(
-            msg.content or "",
+            raw_reply,
             allow_service_ids=session.allow_service_ids_this_turn,
         )
         session.history.append({"role": "assistant", "content": final_text})
@@ -3109,6 +4040,22 @@ async def _run_agent(session: CopilotSession, user_message: str) -> Dict[str, An
             "Проверьте логи backend и попробуйте переформулировать запрос."
         )
         session.history.append({"role": "assistant", "content": final_text})
+
+    # Vision-постобработка: если в этом ходу был image, ассистент в своём
+    # ТЗ-ответе обычно перечисляет распознанные параметры. Прокинем reply
+    # через тот же extractor — это снимает ложные cascade-block'и и
+    # обновляет client_profile.
+    # Дополнительно — сразу де-гидратируем image_url в плейсхолдер, в который
+    # вшиваем сжатую выжимку ТЗ. Это критично: на следующем turn'е
+    # `_user_messages_from_history` должен видеть слова «Турция/Москва/семья»,
+    # иначе cascade-block переспросит то, что уже распознано на скриншоте.
+    if images and final_text:
+        _update_collected_slots(session, final_text)
+        if not session.client_profile:
+            session.client_profile = _extract_client_profile_hint(
+                final_text, session.client_profile
+            )
+        _dehydrate_image_history_with_summary(session, final_text)
 
     return _build_agent_response(session, final_text, last_call_summary)
 
@@ -3153,6 +4100,7 @@ def _build_agent_response(
         "slots_collected": dict(session.collected_slots),
         "cascade_missing": session.last_cascade_missing,
         "cascade_nudge": session.last_cascade_nudge,
+        "client_profile": session.client_profile,
     }
 
 
@@ -3161,16 +4109,56 @@ def _build_agent_response(
 # ────────────────────────────────────────────────────────────────────
 
 
+_MAX_IMAGE_PAYLOAD_BYTES = 6 * 1024 * 1024  # 6 MB на одну картинку (data:URL)
+_MAX_IMAGES_PER_TURN = 4
+
+
+def _validate_images_payload(raw: Any) -> Tuple[List[str], Optional[str]]:
+    """Принимает список из data:URL/https URL и валидирует:
+    - максимум 4 шт. на ход;
+    - каждая ≤6 MB (грубая оценка по длине base64 строки);
+    - схемы: data:image/* или https:// (минимальная защита).
+    Возвращает (clean_list, error_msg)."""
+    if raw in (None, ""):
+        return [], None
+    if not isinstance(raw, list):
+        return [], "images_must_be_list"
+    cleaned: List[str] = []
+    for item in raw[:_MAX_IMAGES_PER_TURN]:
+        if not isinstance(item, str):
+            return [], "image_must_be_string"
+        s = item.strip()
+        if not s:
+            continue
+        if s.startswith("data:image/"):
+            if len(s) > _MAX_IMAGE_PAYLOAD_BYTES:
+                return [], "image_too_large"
+        elif s.startswith("https://") or s.startswith("http://"):
+            if len(s) > 2048:
+                return [], "image_url_too_long"
+        else:
+            return [], "image_scheme_unsupported"
+        cleaned.append(s)
+    return cleaned, None
+
+
 @app.post("/api/copilot/chat")
 def copilot_chat():
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
-    if not message:
+    images, img_err = _validate_images_payload(data.get("images"))
+    if img_err:
+        return jsonify({"error": img_err}), 400
+    if not message and not images:
         return jsonify({"error": "message_required"}), 400
 
     session = _get_session(data.get("conversation_id"))
     started = time.time()
-    payload = asyncio.run(_run_agent(session, message))
+    try:
+        payload = asyncio.run(_run_agent(session, message, images=images))
+    finally:
+        if images:
+            _dehydrate_image_history(session)
     elapsed = time.time() - started
     logger.info(
         "[%s] chat done in %.2fs cards=%d tools=%s",
@@ -3187,17 +4175,92 @@ def copilot_chat():
 def chat_v1():
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
-    if not message:
+    images, img_err = _validate_images_payload(data.get("images"))
+    if img_err:
+        return jsonify({"error": img_err}), 400
+    if not message and not images:
         return jsonify({"error": "message_required"}), 400
     session = _get_session(data.get("conversation_id"))
-    payload = asyncio.run(_run_agent(session, message))
+    try:
+        payload = asyncio.run(_run_agent(session, message, images=images))
+    finally:
+        if images:
+            _dehydrate_image_history(session)
     return jsonify(
         {
             "reply": payload["reply"],
             "tour_cards": payload.get("tour_cards", []),
             "conversation_id": session.id,
+            "client_profile": payload.get("client_profile"),
         }
     )
+
+
+@app.post("/api/copilot/profile/clear")
+def copilot_profile_clear():
+    """Сбрасывает session.client_profile для указанной беседы.
+    Используется UI-чипом «×» над инпутом, когда турагент хочет обновить
+    профиль с нуля или скрыть его влияние на следующий ход."""
+    data = request.get_json(silent=True) or {}
+    cid = data.get("conversation_id")
+    if not cid:
+        return jsonify({"error": "conversation_id_required"}), 400
+    session = SESSIONS.get(cid)
+    if session is None:
+        return jsonify({"ok": True, "conversation_id": cid, "client_profile": None})
+    session.client_profile = None
+    session.profile_offered = False
+    return jsonify({"ok": True, "conversation_id": cid, "client_profile": None})
+
+
+@app.post("/api/copilot/profile/set")
+def copilot_profile_set():
+    """Ручная установка / редактирование client_profile турагентом.
+    Принимает {conversation_id, profile} (≤200 символов). Перезаписывает
+    предыдущее значение целиком; пустую строку трактует как clear."""
+    data = request.get_json(silent=True) or {}
+    cid = data.get("conversation_id")
+    if not cid:
+        return jsonify({"error": "conversation_id_required"}), 400
+    raw = (data.get("profile") or "").strip()
+    session = _get_session(cid)
+    if not raw:
+        session.client_profile = None
+        session.profile_offered = False
+        return jsonify({"ok": True, "conversation_id": cid, "client_profile": None})
+    session.client_profile = raw[:200]
+    session.profile_offered = True
+    return jsonify({
+        "ok": True,
+        "conversation_id": cid,
+        "client_profile": session.client_profile,
+    })
+
+
+@app.get("/api/copilot/country-memos")
+def copilot_country_memos_list():
+    """Список доступных памяток (короткое превью для UI-индекса)."""
+    memos = _load_country_memos()
+    items = [
+        {
+            "country": name,
+            "slug": data.get("slug") or name.lower(),
+            "intro": data.get("intro", "")[:200],
+        }
+        for name, data in memos.items()
+    ]
+    items.sort(key=lambda x: x["country"])
+    return jsonify({"items": items, "count": len(items)})
+
+
+@app.get("/api/copilot/country-memos/<path:slug>")
+def copilot_country_memo_one(slug: str):
+    """Полная памятка по стране/slug."""
+    found = _find_country_memo(slug)
+    if not found:
+        return jsonify({"error": "memo_not_found"}), 404
+    name, data = found
+    return jsonify({"country": name, **data})
 
 
 @app.get("/api/hotel/<int:hotel_code>")
@@ -3338,6 +4401,101 @@ def tour_actualize(tour_id: str):
 COLLECTIONS: Dict[str, Dict[str, Any]] = {}
 COLLECTION_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 дней
 
+# ── Персистентность (итерация 6) ──────────────────────────────────────
+# До итерации 6 COLLECTIONS жил только в RAM — при рестарте backend все
+# share-ссылки клиентов протухали. Теперь параллельно с in-memory dict
+# каждая коллекция дублируется на диск (`backend/data/collections/<id>.json`).
+# В RAM держим горячий кэш для быстрого ответа; при cache miss читаем с диска.
+# Для prod-режима достаточно: ~10 KB/коллекция × 30 дней = меньше мегабайта.
+COLLECTIONS_DIR = os.path.join(os.path.dirname(__file__), "data", "collections")
+
+
+def _ensure_collections_dir() -> None:
+    try:
+        os.makedirs(COLLECTIONS_DIR, exist_ok=True)
+    except OSError:
+        logger.warning("Не удалось создать %s — share-коллекции будут только в RAM", COLLECTIONS_DIR)
+
+
+def _collection_file(cid: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", cid)[:64]
+    return os.path.join(COLLECTIONS_DIR, f"{safe}.json")
+
+
+def _persist_collection(cid: str, payload: Dict[str, Any]) -> None:
+    _ensure_collections_dir()
+    try:
+        with open(_collection_file(cid), "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except OSError as exc:
+        logger.warning("collection persist failed for %s: %s", cid, exc)
+
+
+def _load_collection_from_disk(cid: str) -> Optional[Dict[str, Any]]:
+    path = _collection_file(cid)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("collection load failed for %s: %s", cid, exc)
+        return None
+
+
+def _delete_collection_from_disk(cid: str) -> None:
+    path = _collection_file(cid)
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _get_collection(cid: str) -> Optional[Dict[str, Any]]:
+    """Достаёт коллекцию из RAM-кэша, при промахе подтягивает с диска."""
+    payload = COLLECTIONS.get(cid)
+    if payload is not None:
+        return payload
+    payload = _load_collection_from_disk(cid)
+    if payload is None:
+        return None
+    # Фильтр TTL — даже если файл сохранён давно, не отдаём просроченные.
+    created = float(payload.get("created_ts") or 0)
+    if created and time.time() - created > COLLECTION_TTL_SECONDS:
+        _delete_collection_from_disk(cid)
+        return None
+    COLLECTIONS[cid] = payload
+    return payload
+
+
+def _bootstrap_collections_cache() -> None:
+    """При старте backend читает все на-диск коллекции в RAM (если их немного).
+    Для очень больших объёмов можно оставить ленивую загрузку — тогда удалить
+    этот вызов; коллекции будут подгружаться по запросу."""
+    _ensure_collections_dir()
+    try:
+        files = [f for f in os.listdir(COLLECTIONS_DIR) if f.endswith(".json")]
+    except OSError:
+        return
+    loaded = 0
+    expired = 0
+    now = time.time()
+    for fname in files:
+        cid = fname[:-5]
+        payload = _load_collection_from_disk(cid)
+        if not payload:
+            continue
+        created = float(payload.get("created_ts") or 0)
+        if created and now - created > COLLECTION_TTL_SECONDS:
+            _delete_collection_from_disk(cid)
+            expired += 1
+            continue
+        COLLECTIONS[cid] = payload
+        loaded += 1
+    if loaded or expired:
+        logger.info("collections bootstrap: loaded=%d, expired-purged=%d", loaded, expired)
+
 
 def _purge_expired_collections() -> None:
     now = time.time()
@@ -3348,6 +4506,44 @@ def _purge_expired_collections() -> None:
     ]
     for cid in expired:
         COLLECTIONS.pop(cid, None)
+        _delete_collection_from_disk(cid)
+
+
+# ── Аналитика просмотров (итерация 7) ─────────────────────────────────
+# Счётчик views пишется внутри объекта коллекции (поля views, last_viewed_at,
+# unique_views_keys). unique_views_keys — короткий хеш sha256(ip+UA), хранится
+# как list[str], чтобы ровно одно открытие одним клиентом считалось один раз.
+# Эта телеметрия публичной share-страницы — никаких персональных данных,
+# только агрегаты для турагента: «клиент открывал, значит лид греется».
+
+
+def _client_view_key() -> str:
+    ip = (
+        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or request.remote_addr
+        or ""
+    )
+    ua = request.headers.get("User-Agent", "")
+    return hashlib.sha256(f"{ip}|{ua}".encode("utf-8")).hexdigest()[:16]
+
+
+def _record_collection_view(cid: str, payload: Dict[str, Any]) -> None:
+    """Инкрементирует счётчик просмотров. Не падает при ошибке записи."""
+    try:
+        payload["views"] = int(payload.get("views") or 0) + 1
+        payload["last_viewed_at"] = time.time()
+        unique = list(payload.get("unique_views_keys") or [])
+        key = _client_view_key()
+        if key and key not in unique:
+            unique.append(key)
+            payload["unique_views_keys"] = unique[-256:]  # safety cap
+        COLLECTIONS[cid] = payload
+        _persist_collection(cid, payload)
+    except Exception as exc:
+        logger.warning("collection view tracking failed for %s: %s", cid, exc)
+
+
+_bootstrap_collections_cache()
 
 
 def _share_card_payload(card: Dict[str, Any]) -> Dict[str, Any]:
@@ -3568,7 +4764,7 @@ def create_collection():
     _purge_expired_collections()
 
     collection_id = uuid.uuid4().hex[:12]
-    COLLECTIONS[collection_id] = {
+    payload = {
         "id": collection_id,
         "created_ts": time.time(),
         "cards": cards_payload,
@@ -3576,6 +4772,8 @@ def create_collection():
         "agent_note": data.get("agent_note") or "",
         "client_profile": profile,
     }
+    COLLECTIONS[collection_id] = payload
+    _persist_collection(collection_id, payload)
 
     base_url = request.host_url.rstrip("/")
     return jsonify({
@@ -3589,10 +4787,26 @@ def create_collection():
 
 @app.get("/api/collection/<collection_id>")
 def get_collection(collection_id: str):
-    payload = COLLECTIONS.get(collection_id)
+    payload = _get_collection(collection_id)
     if not payload:
         return jsonify({"error": "not_found"}), 404
     return jsonify(payload)
+
+
+@app.get("/api/collection/<collection_id>/stats")
+def get_collection_stats(collection_id: str):
+    """Возвращает агрегаты просмотров share-подборки для турагента.
+    Используется UI-бейджем «N просмотров» в CollectionsView."""
+    payload = _get_collection(collection_id)
+    if not payload:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify({
+        "collection_id": collection_id,
+        "views": int(payload.get("views") or 0),
+        "unique_views": len(payload.get("unique_views_keys") or []),
+        "last_viewed_at": payload.get("last_viewed_at"),
+        "created_ts": payload.get("created_ts"),
+    })
 
 
 def _format_price_ru(value: int, currency: str = "RUB") -> str:
@@ -4191,7 +5405,9 @@ def share_collection(collection_id: str):
     """Публичная HTML-страница подборки. Открывается клиентом по ссылке.
     Намеренно не использует ничего, кроме встроенного HTML — никаких
     внешних JS, никаких ссылок на Tourvisor."""
-    payload = COLLECTIONS.get(collection_id)
+    payload = _get_collection(collection_id)
+    if payload:
+        _record_collection_view(collection_id, payload)
     if not payload:
         return Response("Подборка не найдена или истёк срок ссылки.", status=404, mimetype="text/html")
 
@@ -4296,7 +5512,7 @@ def _render_email_card(card: Dict[str, Any]) -> str:
 @app.get("/share/<collection_id>/email")
 def share_email(collection_id: str):
     """E-mail-вариант подборки. Inline-стили, table-вёрстка, готов к копи-пасту в письмо."""
-    payload = COLLECTIONS.get(collection_id)
+    payload = _get_collection(collection_id)
     if not payload:
         return Response("Подборка не найдена.", status=404, mimetype="text/html")
 

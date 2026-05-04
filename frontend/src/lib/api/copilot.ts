@@ -89,3 +89,24 @@ export async function createCollection(
   }
   return res.json();
 }
+
+export interface CollectionStats {
+  collection_id: string;
+  views: number;
+  unique_views: number;
+  last_viewed_at?: number | null;
+  created_ts?: number | null;
+}
+
+/** GET /api/collection/<id>/stats — аналитика просмотров share-подборки. */
+export async function fetchCollectionStats(
+  collectionId: string
+): Promise<CollectionStats | null> {
+  try {
+    const res = await fetch(`${API_BASE}/api/collection/${collectionId}/stats`);
+    if (!res.ok) return null;
+    return (await res.json()) as CollectionStats;
+  } catch {
+    return null;
+  }
+}

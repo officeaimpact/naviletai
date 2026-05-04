@@ -6,6 +6,7 @@ import { TourCardComponent } from "@/components/cards/TourCard";
 import { cn } from "@/lib/utils";
 import {
   AlertTriangle,
+  Bookmark,
   Check,
   CheckSquare,
   Copy,
@@ -18,6 +19,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import { createCollection } from "@/lib/api/copilot";
+import { useSavedCollections } from "@/contexts/SavedCollectionsContext";
+import { SaveCollectionModal } from "@/components/chat/SaveCollectionModal";
 
 async function copyToClipboard(text: string): Promise<boolean> {
   try {
@@ -211,9 +214,45 @@ function MessageBubble({
       : [];
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [saveModalOpen, setSaveModalOpen] = useState(false);
+  const [savedToast, setSavedToast] = useState<string | null>(null);
+  const [filterFlag, setFilterFlag] = useState<string | null>(null);
+  const { saveCollection } = useSavedCollections();
 
   const cards = message.tour_cards || [];
   const selectedCards = cards.filter((c) => selectedIds.has(c.tour_id));
+
+  // Фильтр-чипы видны только когда (а) ≥3 карточек в выдаче и (б) backend
+  // проставил хотя бы один recommend/match-флаг. На малой выдаче или без
+  // флагов чипы только засоряют интерфейс.
+  const availableFilters = (() => {
+    const seen = new Set<string>();
+    for (const card of cards) {
+      for (const f of card.flags || []) {
+        if (
+          f.type === "recommend_optimum" ||
+          f.type === "recommend_premium" ||
+          f.type === "recommend_budget" ||
+          f.type === "match_family" ||
+          f.type === "match_couple"
+        ) {
+          seen.add(f.type);
+        }
+      }
+    }
+    const order = [
+      { type: "recommend_optimum", label: "🥇 Лучший" },
+      { type: "recommend_premium", label: "💎 Премиум" },
+      { type: "recommend_budget", label: "💰 Дешевле" },
+      { type: "match_family", label: "👨‍👩‍👧 Для семьи" },
+      { type: "match_couple", label: "💕 Для пары" },
+    ];
+    return order.filter((f) => seen.has(f.type));
+  })();
+  const showFilters = cards.length >= 3 && availableFilters.length > 0 && !selectionMode;
+  const filteredCards = filterFlag
+    ? cards.filter((c) => (c.flags || []).some((f) => f.type === filterFlag))
+    : cards;
 
   const exitSelection = () => {
     setSelectionMode(false);
@@ -232,6 +271,40 @@ function MessageBubble({
   const handleSubmitSelection = () => {
     if (selectedCards.length === 0 || !onCollectFinal) return;
     onCollectFinal(selectedCards);
+    exitSelection();
+  };
+
+  /** Имя по умолчанию для подборки: «<Страна>, <Курорт> · N вар.» */
+  const buildDefaultName = (subset: TourCard[]): string => {
+    if (subset.length === 0) return "Подборка";
+    const first = subset[0];
+    const country = first?.country || "";
+    const resorts = Array.from(
+      new Set(subset.map((c) => c.resort).filter(Boolean))
+    );
+    const resortPart =
+      resorts.length === 0
+        ? ""
+        : resorts.length <= 2
+          ? `, ${resorts.join("/")}`
+          : `, ${resorts[0]} и др.`;
+    return `${country || "Подборка"}${resortPart} · ${subset.length} вар.`;
+  };
+
+  const handleOpenSave = () => {
+    if (selectedCards.length === 0) return;
+    setSaveModalOpen(true);
+  };
+
+  const handlePersistSave = (name: string) => {
+    if (selectedCards.length === 0) {
+      setSaveModalOpen(false);
+      return;
+    }
+    const saved = saveCollection(name, selectedCards);
+    setSaveModalOpen(false);
+    setSavedToast(`Сохранено в избранное: ${saved.name}`);
+    setTimeout(() => setSavedToast(null), 3000);
     exitSelection();
   };
 
@@ -296,7 +369,9 @@ function MessageBubble({
             <p className="text-xs text-muted-foreground">
               {selectionMode
                 ? `Выбрано ${selectedIds.size} из ${cards.length}`
-                : `Найдено ${cards.length} вариантов`}
+                : filterFlag
+                  ? `Показано ${filteredCards.length} из ${cards.length}`
+                  : `Найдено ${cards.length} вариантов`}
             </p>
             {!selectionMode && (
               <Button
@@ -332,10 +407,22 @@ function MessageBubble({
                   Отмена
                 </Button>
                 <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleOpenSave}
+                  disabled={selectedCards.length === 0}
+                  className="gap-1.5 border-brand/40 text-brand hover:bg-brand/5 disabled:opacity-50"
+                  title="Сохранить выбранные туры как именованную подборку в избранное"
+                >
+                  <Bookmark className="h-3.5 w-3.5" />
+                  Сохранить{selectedCards.length > 0 ? ` (${selectedCards.length})` : ""}
+                </Button>
+                <Button
                   size="sm"
                   onClick={handleSubmitSelection}
                   disabled={selectedCards.length === 0}
                   className="gap-1.5 bg-brand text-white hover:bg-brand-dark disabled:opacity-50"
+                  title="Положить выбранные туры в чат как новое сообщение от ассистента (с share-кнопкой)"
                 >
                   <Check className="h-3.5 w-3.5" />
                   Собрать подборку{selectedCards.length > 0 ? ` (${selectedCards.length})` : ""}
@@ -344,7 +431,77 @@ function MessageBubble({
             )}
           </div>
 
-          {cards.map((card, i) => {
+          {savedToast && (
+            <motion.div
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700"
+            >
+              <Check className="h-3 w-3" />
+              {savedToast}
+            </motion.div>
+          )}
+
+          {showFilters && (
+            <div className="-mt-1 flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                Логика продажи:
+              </span>
+              <button
+                type="button"
+                onClick={() => setFilterFlag(null)}
+                className={cn(
+                  "rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition",
+                  filterFlag === null
+                    ? "border-brand bg-brand text-white"
+                    : "border-border bg-white text-muted-foreground hover:border-brand/40 hover:text-brand"
+                )}
+              >
+                Все ({cards.length})
+              </button>
+              {availableFilters.map((f) => {
+                const count = cards.filter((c) =>
+                  (c.flags || []).some((fl) => fl.type === f.type)
+                ).length;
+                const isActive = filterFlag === f.type;
+                return (
+                  <button
+                    key={f.type}
+                    type="button"
+                    onClick={() => setFilterFlag(isActive ? null : f.type)}
+                    className={cn(
+                      "rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition",
+                      isActive
+                        ? "border-emerald-400 bg-emerald-50 text-emerald-700"
+                        : "border-border bg-white text-muted-foreground hover:border-emerald-300 hover:text-emerald-700"
+                    )}
+                    title={`${f.label} · ${count} вариант(ов)`}
+                  >
+                    {f.label} {count > 0 ? `· ${count}` : ""}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <AnimatePresence>
+            {saveModalOpen && (
+              <SaveCollectionModal
+                cards={selectedCards}
+                defaultName={buildDefaultName(selectedCards)}
+                onClose={() => setSaveModalOpen(false)}
+                onSave={handlePersistSave}
+              />
+            )}
+          </AnimatePresence>
+
+          {filteredCards.length === 0 && filterFlag && (
+            <div className="rounded-xl border border-dashed border-border bg-muted/40 p-4 text-center text-xs text-muted-foreground">
+              По этому фильтру нет вариантов в текущей выдаче. Сбросьте фильтр или попросите ассистента показать другие туры.
+            </div>
+          )}
+
+          {filteredCards.map((card, i) => {
             const isSelected = selectedIds.has(card.tour_id);
             return (
               <motion.div

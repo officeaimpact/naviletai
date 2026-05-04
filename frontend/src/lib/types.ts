@@ -1,6 +1,13 @@
 export type FavoriteRefreshStatus = "ok" | "expired" | "unavailable" | "error";
 
-export type CardFlagSeverity = "info" | "warning" | "risk";
+export type CardFlagSeverity =
+  | "info"
+  | "warning"
+  | "risk"
+  /** Главный recommend-бейдж (логика продажи): 💎 Премиум · 🥇 Лучший · 💰 Дешевле */
+  | "recommend"
+  /** Match под профиль клиента: 👨‍👩‍👧 Для семьи · 💕 Для пары */
+  | "match";
 
 export interface CardFlag {
   type: string;
@@ -173,6 +180,9 @@ export interface ChatResponse {
   tool_trace?: string[];
   /** Источник ответа: tourvisor_api / agent / hotel_info / cascade_block / … */
   source?: string;
+  /** Лёгкий профиль клиента (≤200 симв.), накопленный backend-ом из переписки.
+   *  Отображается чипом над инпутом; null/undefined = чип скрыт. */
+  client_profile?: string | null;
 }
 
 export interface ChatSession {

@@ -2,7 +2,11 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { ChatMessage, ChatSession } from "@/lib/types";
-import { sendMessage } from "@/lib/api";
+import {
+  sendMessage,
+  clearClientProfile as clearClientProfileApi,
+  setClientProfile as setClientProfileApi,
+} from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
 
 const STORAGE_KEY = "navylet_sessions";
@@ -43,6 +47,9 @@ export function useChat() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Профиль клиента: накапливается backend-ом из переписки, отображается чипом
+  // над инпутом. null = чип скрыт. См. CopilotSession.client_profile в backend.
+  const [clientProfile, setClientProfile] = useState<string | null>(null);
   const prevAuthKey = useRef<string | null>(null);
   const migratedForUser = useRef<string | null>(null);
 
@@ -74,8 +81,7 @@ export function useChat() {
           }
         });
     } else {
-      setSessions([]);
-      if (typeof window !== "undefined") localStorage.removeItem(STORAGE_KEY);
+      setSessions(loadLocalSessions());
     }
   }, [authKey, isAuth, supabase, authLoading]);
 
@@ -163,6 +169,7 @@ export function useChat() {
           : s
       );
       setSessions(updated);
+      if (!isAuth) saveLocalSessions(updated);
 
       if (isAuth) {
         await supabase.from("chat_sessions").upsert({
@@ -189,14 +196,19 @@ export function useChat() {
   );
 
   const send = useCallback(
-    async (text: string) => {
-      if (!text.trim() || isLoading) return;
+    async (text: string, images?: string[]) => {
+      const trimmed = text.trim();
+      const hasImages = !!images && images.length > 0;
+      if ((!trimmed && !hasImages) || isLoading) return;
       setError(null);
+
+      const userContent = trimmed
+        || (hasImages ? `[Прикреплено изображений: ${images!.length}]` : "");
 
       const userMsg: ChatMessage = {
         id: generateId(),
         role: "user",
-        content: text.trim(),
+        content: userContent,
         timestamp: Date.now(),
       };
 
@@ -205,7 +217,14 @@ export function useChat() {
       setIsLoading(true);
 
       try {
-        const response = await sendMessage(text.trim(), conversationId || undefined);
+        const response = await sendMessage(
+          trimmed,
+          conversationId || undefined,
+          hasImages ? images : undefined,
+        );
+        if (response.client_profile !== undefined) {
+          setClientProfile(response.client_profile ?? null);
+        }
         let currentSessionId = activeSessionId;
         let currentSessions = sessions;
 
@@ -275,7 +294,34 @@ export function useChat() {
     setConversationId(null);
     setActiveSessionId(null);
     setError(null);
+    setClientProfile(null);
   }, []);
+
+  const clearClientProfile = useCallback(async () => {
+    if (!conversationId) {
+      setClientProfile(null);
+      return;
+    }
+    setClientProfile(null);
+    try {
+      await clearClientProfileApi(conversationId);
+    } catch {
+      // Игнорируем сетевую ошибку: чип уже скрыт локально, на следующем
+      // ходу backend пере-выведет профиль из переписки если нужно.
+    }
+  }, [conversationId]);
+
+  const updateClientProfile = useCallback(
+    async (profile: string) => {
+      if (!conversationId) return;
+      const trimmed = profile.trim().slice(0, 200);
+      setClientProfile(trimmed || null);
+      try {
+        await setClientProfileApi(conversationId, trimmed);
+      } catch {}
+    },
+    [conversationId]
+  );
 
   /**
    * Локально добавить пару user/assistant сообщений в текущий чат.
@@ -313,6 +359,9 @@ export function useChat() {
       setActiveSessionId(id);
       setConversationId(id);
       setError(null);
+      // При переключении сессии чип сбрасывается; backend вернёт актуальный
+      // профиль на следующем ходу (он живёт в SESSIONS[cid].client_profile).
+      setClientProfile(null);
 
       if (isAuth) {
         const { data } = await supabase
@@ -346,6 +395,7 @@ export function useChat() {
       }
       const updated = sessions.filter((s) => s.id !== id);
       setSessions(updated);
+      if (!isAuth) saveLocalSessions(updated);
       if (activeSessionId === id) {
         setMessages([]);
         setConversationId(null);
@@ -367,5 +417,8 @@ export function useChat() {
     selectSession,
     deleteSession,
     appendLocal,
+    clientProfile,
+    clearClientProfile,
+    updateClientProfile,
   };
 }

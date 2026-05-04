@@ -3,6 +3,7 @@ import { Inter, Montserrat } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { FavoritesProvider } from "@/contexts/FavoritesContext";
+import { SavedCollectionsProvider } from "@/contexts/SavedCollectionsContext";
 import "./globals.css";
 
 const inter = Inter({
@@ -38,7 +39,9 @@ export default function RootLayout({
       <body className={`${inter.variable} ${montserrat.variable} antialiased`}>
         <AuthProvider>
           <FavoritesProvider>
-            <TooltipProvider>{children}</TooltipProvider>
+            <SavedCollectionsProvider>
+              <TooltipProvider>{children}</TooltipProvider>
+            </SavedCollectionsProvider>
           </FavoritesProvider>
         </AuthProvider>
       </body>

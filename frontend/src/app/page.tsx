@@ -6,10 +6,12 @@ import { MobileNav } from "@/components/layout/MobileNav";
 import { WelcomeScreen } from "@/components/chat/WelcomeScreen";
 import { MessageList } from "@/components/chat/MessageList";
 import { InputBar, type QuickAction } from "@/components/chat/InputBar";
+import { ClientProfileChip } from "@/components/chat/ClientProfileChip";
 import { HotelDetailPanel } from "@/components/detail/HotelDetailPanel";
 import { PhotoGallery } from "@/components/detail/PhotoGallery";
 import { HotelMap } from "@/components/map/HotelMap";
 import { FavoritesView } from "@/components/favorites/FavoritesView";
+import { CountryMemosView } from "@/components/memos/CountryMemosView";
 import { AboutView } from "@/components/about/AboutView";
 import { PartnersView } from "@/components/partners/PartnersView";
 import { useChat } from "@/hooks/useChat";
@@ -61,6 +63,11 @@ const QUICK_ACTIONS_WITHOUT_RESULTS: QuickAction[] = [
     label: "Горящие туры",
     prompt: "Покажи горящие туры из Москвы — что есть прямо сейчас.",
   },
+  {
+    label: "Подборка недели",
+    prompt:
+      "Собери «Подборку недели» для соцсетей агентства: 5–6 интересных туров из текущих горящих предложений, разные страны и ценовые сегменты. Сразу сформируй её в чате как finальную (через build_collection с подходящим title), чтобы я мог взять share-ссылку и отправить клиентам/опубликовать.",
+  },
 ];
 
 export default function Home() {
@@ -73,11 +80,14 @@ export default function Home() {
     newChat,
     selectSession,
     appendLocal,
+    clientProfile,
+    clearClientProfile,
+    updateClientProfile,
   } = useChat();
 
   const { toggleFavorite, isFavorited, favoritedIds } = useFavorites();
 
-  const [view, setView] = useState<"chat" | "favorites" | "about" | "partners">("chat");
+  const [view, setView] = useState<"chat" | "favorites" | "memos" | "about" | "partners">("chat");
   const [selectedCard, setSelectedCard] = useState<TourCard | null>(null);
   const [galleryImages, setGalleryImages] = useState<string[] | null>(null);
   const [galleryStart, setGalleryStart] = useState(0);
@@ -112,6 +122,11 @@ export default function Home() {
 
   const handleFavoritesClick = useCallback(() => {
     setView("favorites");
+    setSelectedCard(null);
+  }, []);
+
+  const handleMemosClick = useCallback(() => {
+    setView("memos");
     setSelectedCard(null);
   }, []);
 
@@ -250,10 +265,12 @@ export default function Home() {
           onNewChat={handleNewChat}
           onSelectSession={handleSelectSession}
           onFavoritesClick={handleFavoritesClick}
+          onMemosClick={handleMemosClick}
           onAboutClick={handleAboutClick}
           onPartnersClick={handlePartnersClick}
           onLogoClick={handleLogoClick}
           isFavoritesActive={view === "favorites"}
+          isMemosActive={view === "memos"}
           isAboutActive={view === "about"}
           isPartnersActive={view === "partners"}
         />
@@ -267,10 +284,12 @@ export default function Home() {
           onNewChat={handleNewChat}
           onSelectSession={handleSelectSession}
           onFavoritesClick={handleFavoritesClick}
+          onMemosClick={handleMemosClick}
           onAboutClick={handleAboutClick}
           onPartnersClick={handlePartnersClick}
           onLogoClick={handleLogoClick}
           isFavoritesActive={view === "favorites"}
+          isMemosActive={view === "memos"}
           isAboutActive={view === "about"}
           isPartnersActive={view === "partners"}
         />
@@ -282,6 +301,8 @@ export default function Home() {
               <PartnersView />
             ) : view === "about" ? (
               <AboutView />
+            ) : view === "memos" ? (
+              <CountryMemosView />
             ) : view === "favorites" ? (
               <FavoritesView
                 onCardDetails={setSelectedCard}
@@ -298,6 +319,11 @@ export default function Home() {
                   favoritedIds={favoritedIds}
                   onShowMap={openMap}
                   onCollectFinal={handleCollectFinal}
+                />
+                <ClientProfileChip
+                  profile={clientProfile}
+                  onClear={clearClientProfile}
+                  onUpdate={updateClientProfile}
                 />
                 <InputBar
                   onSend={send}

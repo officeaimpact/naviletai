@@ -31,3 +31,6 @@ backend/venv/
 
 # Accidental npm lockfile in Python backend
 backend/package-lock.json
+
+# Persisted share-collections (рантайм, не для git)
+backend/data/collections/

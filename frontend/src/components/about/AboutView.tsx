@@ -19,10 +19,10 @@ const STATS = [
   { value: "24/7", label: "онлайн" },
 ];
 
-const MGP_STATS = [
-  { value: "27 лет", label: "на рынке" },
-  { value: "396", label: "офисов" },
-  { value: "5 млн+", label: "туристов" },
+const TOURVISOR_STATS = [
+  { value: "100+", label: "туроператоров" },
+  { value: "50+", label: "стран" },
+  { value: "500+", label: "курортов" },
 ];
 
 const PARTNERS = [
@@ -268,23 +268,23 @@ export function AboutView() {
           <motion.div variants={fadeUp} className="rounded-xl border-2 border-brand/15 bg-brand/[0.02] p-5 mb-5">
             <div className="flex items-start gap-4">
               <img
-                src="/partners/mgp-logo.png"
-                alt="Магазин Горящих Путёвок"
-                className="h-12 w-12 rounded-lg object-contain bg-white p-1.5 border border-border/20 shrink-0"
+                src="/brand/tourvisor-ai-logo.png"
+                alt="TourVisor"
+                className="h-12 w-auto object-contain bg-white p-1.5 rounded-lg border border-border/20 shrink-0"
               />
               <div className="min-w-0">
                 <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-brand/10 text-brand">
-                  Стратегический партнёр
+                  Технологический партнёр
                 </span>
-                <h3 className="text-sm font-bold mt-1.5">Сеть Магазинов Горящих Путёвок</h3>
+                <h3 className="text-sm font-bold mt-1.5">TourVisor</h3>
                 <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                  Крупнейшая турсеть России. Первая компания, внедрившая AI-турассистента
-                  навылет в реальную работу с клиентами.
+                  Поисково-аналитическая платформа для турагентов. Подбор туров по 100+
+                  туроператорам, актуализация цен и оформление бронирования в одном окне.
                 </p>
               </div>
             </div>
             <div className="grid grid-cols-3 gap-3 mt-4 pt-3 border-t border-border/20">
-              {MGP_STATS.map((s) => (
+              {TOURVISOR_STATS.map((s) => (
                 <div key={s.label} className="text-center">
                   <p className="text-sm font-bold text-brand">{s.value}</p>
                   <p className="text-[10px] text-muted-foreground">{s.label}</p>

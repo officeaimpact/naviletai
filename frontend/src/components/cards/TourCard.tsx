@@ -16,15 +16,24 @@ import { cn } from "@/lib/utils";
 import { useState } from "react";
 
 const FLAG_BADGE_STYLES: Record<CardFlagSeverity, string> = {
+  recommend:
+    "bg-emerald-50 text-emerald-700 border border-emerald-300 font-semibold",
+  match: "bg-violet-50 text-violet-700 border border-violet-200",
   info: "bg-slate-100 text-slate-600 border border-slate-200",
   warning: "bg-amber-50 text-amber-700 border border-amber-200",
   risk: "bg-rose-50 text-rose-700 border border-rose-200",
 };
 
+// Приоритет отображения: главные «торговые» бейджи (recommend) — впереди,
+// затем match-профиль, затем рисковые/предупредительные. Это даёт турагенту
+// в первую очередь видеть, какую карточку «продавать», и только потом
+// технические замечания.
 const FLAG_PRIORITY: Record<CardFlagSeverity, number> = {
-  risk: 0,
-  warning: 1,
-  info: 2,
+  recommend: 0,
+  match: 1,
+  risk: 2,
+  warning: 3,
+  info: 4,
 };
 
 interface TourCardProps {
@@ -49,7 +58,9 @@ export function TourCardComponent({
   const sortedFlags = [...flags].sort(
     (a, b) => FLAG_PRIORITY[a.severity] - FLAG_PRIORITY[b.severity]
   );
-  const flagsForBadges = sortedFlags.slice(0, 3);
+  // recommend/match — короткие и яркие, поэтому показываем до 4 флагов,
+  // чтобы фактовые (rating_low, ночной перелёт) не вытеснялись recommend-ом.
+  const flagsForBadges = sortedFlags.slice(0, 4);
   // Если backend уже прислал агентский флаг (on_request / night_flight), не
   // дублируем эти бейджи через старые legacy-поля карточки.
   const flagTypes = new Set(flags.map((f) => f.type));
@@ -147,21 +158,22 @@ export function TourCardComponent({
               {hotelStatus}
             </Badge>
           )}
-          {flagsForBadges.map((flag) => (
-            <span
-              key={`${flag.type}-${flag.label}`}
-              className={cn(
-                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium leading-none",
-                FLAG_BADGE_STYLES[flag.severity]
-              )}
-              title={flag.label}
-            >
-              {flag.severity !== "info" && (
-                <AlertTriangle className="h-2.5 w-2.5" />
-              )}
-              {flag.label}
-            </span>
-          ))}
+          {flagsForBadges.map((flag) => {
+            const isAttention = flag.severity === "warning" || flag.severity === "risk";
+            return (
+              <span
+                key={`${flag.type}-${flag.label}`}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium leading-none",
+                  FLAG_BADGE_STYLES[flag.severity]
+                )}
+                title={flag.label}
+              >
+                {isAttention && <AlertTriangle className="h-2.5 w-2.5" />}
+                {flag.label}
+              </span>
+            );
+          })}
         </div>
 
         {/* Price & Actions */}
@@ -183,7 +195,7 @@ export function TourCardComponent({
             <p className="text-xs text-muted-foreground">
               {card.nights} ночей · {formatPricePerNight(card.price, card.nights)}
             </p>
-            <p className="text-[10px] text-muted-foreground/60 mt-0.5">через mgp.ru</p>
+            <p className="text-[10px] text-muted-foreground/60 mt-0.5">через TourVisor</p>
           </div>
 
           <div className="flex items-center gap-2">

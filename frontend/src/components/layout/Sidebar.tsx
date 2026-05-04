@@ -10,16 +10,16 @@ import {
   Plus,
   Heart,
   Info,
-  Handshake,
+  Bot,
   PanelLeftClose,
   PanelLeft,
   MessageSquare,
   LogOut,
   User,
   Ellipsis,
+  BookOpen,
 } from "lucide-react";
 import { BrandLogo } from "@/components/brand/BrandLogo";
-import { StatusChip } from "@/components/chat/StatusChip";
 import { ChatSession } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
@@ -30,10 +30,12 @@ interface SidebarProps {
   onNewChat: () => void;
   onSelectSession: (id: string) => void;
   onFavoritesClick: () => void;
+  onMemosClick?: () => void;
   onAboutClick?: () => void;
   onPartnersClick?: () => void;
   onLogoClick: () => void;
   isFavoritesActive?: boolean;
+  isMemosActive?: boolean;
   isAboutActive?: boolean;
   isPartnersActive?: boolean;
   collapsed?: boolean;
@@ -46,10 +48,12 @@ export function Sidebar({
   onNewChat,
   onSelectSession,
   onFavoritesClick,
+  onMemosClick,
   onAboutClick,
   onPartnersClick,
   onLogoClick,
   isFavoritesActive = false,
+  isMemosActive = false,
   isAboutActive = false,
   isPartnersActive = false,
   collapsed = false,
@@ -72,16 +76,13 @@ export function Sidebar({
       {/* Logo & Collapse */}
       <div className="flex items-center justify-between p-4">
         {!isCollapsed && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={onLogoClick}
-              className="cursor-pointer transition-opacity hover:opacity-80"
-              aria-label="На главную"
-            >
-              <BrandLogo className="h-8" priority />
-            </button>
-            <StatusChip />
-          </div>
+          <button
+            onClick={onLogoClick}
+            className="cursor-pointer transition-opacity hover:opacity-80"
+            aria-label="На главную"
+          >
+            <BrandLogo className="h-8" priority />
+          </button>
         )}
         <Button
           variant="ghost"
@@ -127,6 +128,20 @@ export function Sidebar({
         </Button>
         <Button
           variant="ghost"
+          onClick={onMemosClick}
+          className={cn(
+            "w-full justify-start gap-2 hover:text-foreground",
+            isMemosActive
+              ? "bg-sidebar-accent text-sidebar-accent-foreground"
+              : "text-muted-foreground"
+          )}
+          size={isCollapsed ? "icon" : "default"}
+        >
+          <BookOpen className="h-4 w-4 shrink-0" />
+          {!isCollapsed && <span>Памятки</span>}
+        </Button>
+        <Button
+          variant="ghost"
           onClick={onAboutClick}
           className={cn(
             "w-full justify-start gap-2 hover:text-foreground",
@@ -150,8 +165,8 @@ export function Sidebar({
           )}
           size={isCollapsed ? "icon" : "default"}
         >
-          <Handshake className="h-4 w-4 shrink-0" />
-          {!isCollapsed && <span>Партнёрам</span>}
+          <Bot className="h-4 w-4 shrink-0" />
+          {!isCollapsed && <span>ИИ-ассистент</span>}
         </Button>
       </div>
 
@@ -197,7 +212,7 @@ export function Sidebar({
       {/* Footer attribution (auth removed for B2B agent build) */}
       <div className="border-t border-sidebar-border px-3 py-3">
         <p className="text-[10px] text-muted-foreground/40 text-center leading-tight">
-          {isCollapsed ? "MGP" : "Данные предоставлены «Магазин Горящих Путёвок»"}
+          {isCollapsed ? "TV" : "Поиск туров через TourVisor · 100+ туроператоров"}
         </p>
       </div>
     </aside>

@@ -13,11 +13,13 @@ import {
   Phone, Globe, Ruler, Calendar, Sparkles, Wifi, CreditCard,
   TreePalm, UtensilsCrossed, Music, Navigation, Plane,
   Luggage, Clock, ArrowRight, ShieldCheck, RefreshCw,
+  Check, FileText, Car, Coins,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 import { HotelMap } from "@/components/map/HotelMap";
 import { actualizeTourFull } from "@/lib/api/copilot";
+import { getCountryEssentials } from "@/lib/countryEssentials";
 
 interface HotelDetailPanelProps {
   card: TourCard;
@@ -194,6 +196,246 @@ function FlightSegmentCard({ seg, label }: { seg: FlightSegment; label: string }
   );
 }
 
+/* ───────── Tour Includes Panel — «Что входит в тур» ─────────
+ *
+ * Компактный чек-лист со «галочками» — то, что обычно включено в
+ * пакетный тур, и то, что отдельно. Опирается на данные карточки
+ * (meal_description, flight_included) и опционально на FlightOption
+ * (баггаж/класс). Не делает запросов в API.
+ */
+
+interface TourIncludesPanelProps {
+  card: TourCard;
+  selectedFlight?: FlightOption | null;
+}
+
+function TourIncludesPanel({ card, selectedFlight }: TourIncludesPanelProps) {
+  const flightSeg = selectedFlight?.forward?.[0];
+  const baggage = flightSeg?.baggage;
+  const carryOn = flightSeg?.carry_on;
+  const onDemand = !!flightSeg?.on_demand;
+
+  const flightIncluded = card.flight_included !== false;
+  const meal = card.meal_description || "по программе оператора";
+  const room = card.room_type || card.placement || "стандартный номер";
+
+  const items: Array<{
+    icon: React.ElementType;
+    label: string;
+    value: string;
+    included: boolean;
+    note?: string;
+  }> = [
+    {
+      icon: Plane,
+      label: "Перелёт туда-обратно",
+      value: flightIncluded
+        ? onDemand
+          ? "включён, часть рейса под запрос оператора"
+          : "включён в пакет"
+        : "не включён, оплачивается отдельно",
+      included: flightIncluded,
+    },
+    {
+      icon: Bed,
+      label: "Проживание",
+      value: `${card.nights} ночей · ${room}`,
+      included: true,
+    },
+    {
+      icon: Utensils,
+      label: "Питание",
+      value: meal,
+      included: true,
+    },
+    {
+      icon: Luggage,
+      label: "Багаж",
+      value: baggage
+        ? `${baggage}${carryOn ? ` · ручная кладь ${carryOn}` : ""}`
+        : "по тарифу авиакомпании — уточнится после фиксации перелёта",
+      included: !!baggage,
+      note: !baggage
+        ? "Откройте вкладку «Перелёт» и зафиксируйте конкретный рейс — багаж появится здесь."
+        : undefined,
+    },
+    {
+      icon: ShieldCheck,
+      label: "Медицинская страховка",
+      value:
+        "обычно включена в пакет (покрытие 30 000–50 000 USD). Точный полис — у оператора.",
+      included: true,
+    },
+    {
+      icon: Car,
+      label: "Групповой трансфер",
+      value: "аэропорт ↔ отель — обычно включён",
+      included: true,
+    },
+  ];
+
+  return (
+    <div className="rounded-xl border border-border/50 bg-muted/20">
+      <div className="px-4 py-3 border-b border-border/40">
+        <h3 className="text-sm font-semibold flex items-center gap-2">
+          <Check className="h-4 w-4 text-emerald-600" />
+          Что входит в тур
+        </h3>
+        <p className="text-[11px] text-muted-foreground mt-0.5">
+          Что турагент может уверенно сказать клиенту по этому пакету.
+        </p>
+      </div>
+      <ul className="divide-y divide-border/40">
+        {items.map((item) => {
+          const Icon = item.icon;
+          return (
+            <li key={item.label} className="flex items-start gap-3 px-4 py-2.5">
+              <div
+                className={cn(
+                  "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+                  item.included
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-amber-50 text-amber-700"
+                )}
+              >
+                <Icon className="h-3.5 w-3.5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-medium leading-snug">{item.label}</p>
+                <p className="text-xs text-muted-foreground leading-snug">
+                  {item.value}
+                </p>
+                {item.note ? (
+                  <p className="mt-0.5 text-[11px] text-amber-700">{item.note}</p>
+                ) : null}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/* ───────── Country Essentials Panel — Виза / Страховка / Трансфер ───────── */
+
+function CountryEssentialsPanel({ country }: { country: string }) {
+  const data = getCountryEssentials(country);
+  if (!data) return null;
+
+  const blocks: Array<{
+    icon: React.ElementType;
+    title: string;
+    body: string;
+  }> = [
+    { icon: FileText, title: "Виза", body: data.visa },
+    { icon: ShieldCheck, title: "Страховка", body: data.insurance },
+    { icon: Car, title: "Трансфер", body: data.transfer },
+  ];
+
+  return (
+    <div className="rounded-xl border border-border/50 bg-background">
+      <div className="px-4 py-3 border-b border-border/40 flex items-center justify-between">
+        <h3 className="text-sm font-semibold flex items-center gap-2">
+          <Globe className="h-4 w-4 text-brand" />
+          {country}: что важно знать
+        </h3>
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+          справка для клиента
+        </span>
+      </div>
+      <div className="divide-y divide-border/40">
+        {blocks.map((b) => {
+          const Icon = b.icon;
+          return (
+            <div key={b.title} className="flex items-start gap-3 px-4 py-2.5">
+              <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-brand/10 text-brand">
+                <Icon className="h-3.5 w-3.5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-medium leading-snug">{b.title}</p>
+                <p className="text-xs text-muted-foreground leading-snug">{b.body}</p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {(data.flight_time || data.tz || data.currency) && (
+        <div className="border-t border-border/40 px-4 py-2.5 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+          {data.flight_time && (
+            <span className="inline-flex items-center gap-1">
+              <Plane className="h-3 w-3" /> Лёт: {data.flight_time}
+            </span>
+          )}
+          {data.tz && (
+            <span className="inline-flex items-center gap-1">
+              <Clock className="h-3 w-3" /> {data.tz}
+            </span>
+          )}
+          {data.currency && (
+            <span className="inline-flex items-center gap-1">
+              <Coins className="h-3 w-3" /> {data.currency}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ───────── Transit & Baggage Summary — над сегментами рейса ───────── */
+
+interface TransitSummaryProps {
+  flight: FlightOption | null | undefined;
+}
+
+function TransitBaggageSummary({ flight }: TransitSummaryProps) {
+  if (!flight) return null;
+  const fwdSegments = flight.forward?.length || 0;
+  const bwdSegments = flight.backward?.length || 0;
+  const fwdTransits = Math.max(0, fwdSegments - 1);
+  const bwdTransits = Math.max(0, bwdSegments - 1);
+  const fwdBaggage = flight.forward?.[0]?.baggage;
+  const bwdBaggage = flight.backward?.[0]?.baggage;
+  const carryOn = flight.forward?.[0]?.carry_on;
+
+  const transitText =
+    fwdTransits === 0 && bwdTransits === 0
+      ? "Прямой перелёт без пересадок"
+      : `Туда: ${fwdTransits === 0 ? "прямой" : `${fwdTransits} пересадк${fwdTransits === 1 ? "а" : "и"}`} · Обратно: ${bwdTransits === 0 ? "прямой" : `${bwdTransits} пересадк${bwdTransits === 1 ? "а" : "и"}`}`;
+
+  return (
+    <div className="rounded-xl border border-border/40 bg-muted/30 p-3 space-y-2">
+      <div className="flex items-start gap-2">
+        <Navigation className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
+        <div className="min-w-0">
+          <p className="text-[13px] font-medium leading-snug">{transitText}</p>
+          {(fwdTransits > 0 || bwdTransits > 0) && (
+            <p className="text-[11px] text-muted-foreground leading-snug">
+              Считайте время на пересадку и регистрацию (1,5–2 ч между рейсами).
+            </p>
+          )}
+        </div>
+      </div>
+      {(fwdBaggage || bwdBaggage || carryOn) && (
+        <div className="flex items-start gap-2 pt-1 border-t border-border/40">
+          <Luggage className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-medium leading-snug">Нормы багажа</p>
+            <p className="text-[11px] text-muted-foreground leading-snug">
+              {fwdBaggage && <>Туда: {fwdBaggage}</>}
+              {bwdBaggage && fwdBaggage !== bwdBaggage && (
+                <> · Обратно: {bwdBaggage}</>
+              )}
+              {carryOn && <> · Ручная кладь: {carryOn}</>}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ───────── Main Component ───────── */
 
 export function HotelDetailPanel({
@@ -297,8 +539,28 @@ export function HotelDetailPanel({
   );
 
   const description = hotelInfo?.description || "";
-  const isDescLong = description.length > 250;
-  const descText = isDescLong && !descExpanded ? description.slice(0, 250) + "..." : description;
+  const COLLAPSED_DESC_LEN = 600;
+  const isDescLong = description.length > COLLAPSED_DESC_LEN;
+  const descText =
+    isDescLong && !descExpanded
+      ? description.slice(0, COLLAPSED_DESC_LEN).replace(/\s+\S*$/, "") + "…"
+      : description;
+
+  /** Краткая выжимка из API: первые 1–2 пункта по территории/пляжу/инфраструктуре —
+   *  чтобы агент сразу видел ключевые отличия отеля без раскрытия всех «Удобств». */
+  const summarizeChunk = (raw?: string | null, max = 130): string | null => {
+    if (!raw) return null;
+    const items = raw
+      .split(/[;.\n]/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 4 && s.length < 200);
+    if (items.length === 0) return null;
+    const head = items.slice(0, 2).join("; ");
+    return head.length > max ? head.slice(0, max).replace(/\s+\S*$/, "") + "…" : head;
+  };
+  const territorySummary = summarizeChunk(hotelInfo?.territory);
+  const beachSummary = summarizeChunk(hotelInfo?.beach);
+  const childSummary = summarizeChunk(hotelInfo?.child);
 
   const ratingLabel =
     parseFloat(card.hotel_rating) >= 4.5 ? "Отлично" :
@@ -435,26 +697,73 @@ export function HotelDetailPanel({
             {/* Description */}
             {loading ? (
               <div className="space-y-2"><Skeleton className="h-5 w-32" /><Skeleton className="h-24 w-full" /></div>
-            ) : description ? (
-              <div className="space-y-2">
+            ) : description || territorySummary || beachSummary ? (
+              <div className="space-y-3">
                 <h3 className="font-semibold text-base">Про отель</h3>
-                <p className="text-sm text-muted-foreground leading-relaxed">{descText}</p>
+                {description ? (
+                  <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-line">
+                    {descText}
+                  </p>
+                ) : (
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    {card.resort}, {card.country}. {card.hotel_stars} звёзд.
+                    {card.sea_distance && ` ${card.sea_distance} до пляжа.`}
+                    {card.meal_description && ` Питание: ${card.meal_description}.`}
+                  </p>
+                )}
+
+                {/* Краткая выжимка по фактам из TourVisor: пляж/территория/дети.
+                    Показываем только если есть заметные данные. */}
+                {(territorySummary || beachSummary || childSummary) && (
+                  <div className="rounded-xl border border-border/40 bg-muted/30 p-3 space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      Ключевое из карточки
+                    </p>
+                    <ul className="space-y-1.5 text-sm text-foreground/85">
+                      {beachSummary && (
+                        <li className="flex items-start gap-2">
+                          <Waves className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand" />
+                          <span>
+                            <span className="font-medium">Пляж:</span> {beachSummary}
+                          </span>
+                        </li>
+                      )}
+                      {territorySummary && (
+                        <li className="flex items-start gap-2">
+                          <TreePalm className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand" />
+                          <span>
+                            <span className="font-medium">Территория:</span> {territorySummary}
+                          </span>
+                        </li>
+                      )}
+                      {childSummary && (
+                        <li className="flex items-start gap-2">
+                          <Baby className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand" />
+                          <span>
+                            <span className="font-medium">Для детей:</span> {childSummary}
+                          </span>
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+
                 {isDescLong && (
-                  <button onClick={() => setDescExpanded(!descExpanded)} className="text-brand text-sm font-medium hover:underline">
-                    {descExpanded ? "Свернуть" : "Показать ещё"}
+                  <button
+                    onClick={() => setDescExpanded(!descExpanded)}
+                    className="text-brand text-sm font-medium hover:underline"
+                  >
+                    {descExpanded ? "Свернуть" : "Показать всё описание"}
                   </button>
                 )}
               </div>
-            ) : (
-              <div className="space-y-2">
-                <h3 className="font-semibold text-base">Про отель</h3>
-                <p className="text-sm text-muted-foreground">
-                  {card.resort}, {card.country}. {card.hotel_stars} звёзд.
-                  {card.sea_distance && ` ${card.sea_distance} до пляжа.`}
-                  {card.meal_description && ` Питание: ${card.meal_description}.`}
-                </p>
-              </div>
-            )}
+            ) : null}
+
+            {/* «Что входит в тур» — чек-лист включённого/исключённого */}
+            <TourIncludesPanel card={card} selectedFlight={card.selected_flight} />
+
+            {/* Виза / Страховка / Трансфер по стране */}
+            <CountryEssentialsPanel country={card.country} />
 
             {/* Booking card */}
             <div className="rounded-xl border border-brand/20 bg-brand/[0.03] p-4 space-y-3">
@@ -476,7 +785,7 @@ export function HotelDetailPanel({
                 {card.hotel_link ? (
                   <Button className="bg-brand hover:bg-brand-dark text-white font-semibold px-5 shrink-0 w-full sm:w-auto" asChild>
                     <a href={card.hotel_link} target="_blank" rel="noopener noreferrer">
-                      Открыть на mgp.ru<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
+                      Перейти к бронированию<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
                     </a>
                   </Button>
                 ) : (
@@ -509,7 +818,7 @@ export function HotelDetailPanel({
               <div className="flex items-center gap-2 pt-2 border-t border-border/30">
                 <ShieldCheck className="h-3.5 w-3.5 text-brand shrink-0" />
                 <p className="text-[11px] text-muted-foreground leading-tight">
-                  Оформление тура на сайте «Магазин Горящих Путёвок». 27 лет на рынке · 200+ офисов по России
+                  Поиск и бронирование через TourVisor — 100+ туроператоров России
                 </p>
               </div>
             </div>
@@ -724,6 +1033,9 @@ export function HotelDetailPanel({
 
               return (
                 <>
+                  {/* Стыковки и багаж — сводка над сегментами */}
+                  <TransitBaggageSummary flight={selected} />
+
                   {/* Tariff */}
                   <div className="rounded-xl border border-border/50 p-4 space-y-2">
                     <h4 className="text-sm font-semibold">Условия тарифа</h4>
@@ -812,7 +1124,7 @@ export function HotelDetailPanel({
                       {card.hotel_link ? (
                         <Button className="bg-brand hover:bg-brand-dark text-white font-semibold px-5 shrink-0" asChild>
                           <a href={card.hotel_link} target="_blank" rel="noopener noreferrer">
-                            Открыть на mgp.ru<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
+                            Перейти к бронированию<ExternalLink className="h-3.5 w-3.5 ml-1.5" />
                           </a>
                         </Button>
                       ) : (
@@ -837,7 +1149,7 @@ export function HotelDetailPanel({
                     <div className="flex items-center gap-2 pt-2 border-t border-border/30">
                       <ShieldCheck className="h-3.5 w-3.5 text-brand shrink-0" />
                       <p className="text-[11px] text-muted-foreground leading-tight">
-                        Оформление тура на сайте «Магазин Горящих Путёвок». 27 лет на рынке · 200+ офисов по России
+                        Поиск и бронирование через TourVisor — 100+ туроператоров России
                       </p>
                     </div>
                   </div>

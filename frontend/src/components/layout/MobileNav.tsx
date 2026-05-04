@@ -16,10 +16,11 @@ import {
   Plus,
   Heart,
   Info,
-  Handshake,
+  Bot,
   LogOut,
   User,
   ChevronRight,
+  BookOpen,
 } from "lucide-react";
 import { BrandLogo } from "@/components/brand/BrandLogo";
 import { ChatSession } from "@/lib/types";
@@ -32,10 +33,12 @@ interface MobileNavProps {
   onNewChat: () => void;
   onSelectSession: (id: string) => void;
   onFavoritesClick: () => void;
+  onMemosClick?: () => void;
   onAboutClick?: () => void;
   onPartnersClick?: () => void;
   onLogoClick: () => void;
   isFavoritesActive?: boolean;
+  isMemosActive?: boolean;
   isAboutActive?: boolean;
   isPartnersActive?: boolean;
 }
@@ -46,10 +49,12 @@ export function MobileNav({
   onNewChat,
   onSelectSession,
   onFavoritesClick,
+  onMemosClick,
   onAboutClick,
   onPartnersClick,
   onLogoClick,
   isFavoritesActive = false,
+  isMemosActive = false,
   isAboutActive = false,
   isPartnersActive = false,
 }: MobileNavProps) {
@@ -101,6 +106,19 @@ export function MobileNav({
                 variant="ghost"
                 className={cn(
                   "w-full justify-start gap-2",
+                  isMemosActive
+                    ? "bg-muted text-foreground"
+                    : "text-muted-foreground"
+                )}
+                onClick={onMemosClick}
+              >
+                <BookOpen className="h-4 w-4" />
+                Памятки
+              </Button>
+              <Button
+                variant="ghost"
+                className={cn(
+                  "w-full justify-start gap-2",
                   isAboutActive
                     ? "bg-muted text-foreground"
                     : "text-muted-foreground"
@@ -120,8 +138,8 @@ export function MobileNav({
                 )}
                 onClick={onPartnersClick}
               >
-                <Handshake className="h-4 w-4" />
-                Партнёрам
+                <Bot className="h-4 w-4" />
+                ИИ-ассистент
               </Button>
             </div>
 
@@ -157,7 +175,7 @@ export function MobileNav({
 
             <div className="border-t border-border px-3 py-3 mt-auto">
               <p className="text-[10px] text-muted-foreground/40 text-center leading-tight">
-                Данные предоставлены «Магазин Горящих Путёвок»
+                Поиск туров через TourVisor · 100+ туроператоров
               </p>
             </div>
           </div>
@@ -258,7 +276,7 @@ function MobileNavFooter({ onAuthClick }: { onAuthClick?: () => void }) {
 
       <div className="px-3 pb-2.5 pt-0.5">
         <p className="text-[10px] text-muted-foreground/40 text-center leading-tight">
-          Данные предоставлены «Магазин Горящих Путёвок»
+          Поиск туров через TourVisor · 100+ туроператоров
         </p>
       </div>
     </div>
