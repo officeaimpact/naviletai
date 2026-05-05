@@ -1,0 +1,75 @@
+
+=== Сценарий 1: Каскад из 7 слотов ===
+   ↳ 14 сообщений, 2 с карточками, 50.9s, status=ok
+   ↳ MD: scenarios/sc-01.md
+
+=== Сценарий 2: Vision: скриншот переписки ===
+   ↳ 4 сообщений, 0 с карточками, 12.2s, status=ok
+   ↳ MD: scenarios/sc-02.md
+
+=== Сценарий 3: Профиль клиента + match-флаги (семья) ===
+   ↳ 6 сообщений, 1 с карточками, 27.0s, status=ok
+   ↳ MD: scenarios/sc-03.md
+
+=== Сценарий 4: Recommend-бейджи (премиум-пара) ===
+   ↳ 4 сообщений, 1 с карточками, 25.8s, status=ok
+   ↳ MD: scenarios/sc-04.md
+
+=== Сценарий 5: Сравнение 1 и 2 (6 измерений) ===
+   ↳ 4 сообщений, 1 с карточками, 111.1s, status=ok
+   ↳ MD: scenarios/sc-05.md
+
+=== Сценарий 6: Деталь отеля + актуализация цены ===
+   ↳ 6 сообщений, 0 с карточками, 11.5s, status=ok
+   ↳ MD: scenarios/sc-06.md
+
+=== Сценарий 7: Подборка + share-ссылка + аналитика ===
+   ↳ 4 сообщений, 2 с карточками, 21.2s, status=ok
+   ↳ MD: scenarios/sc-07.md
+
+=== Сценарий 8: Подборка недели ===
+   ↳ 2 сообщений, 1 с карточками, 11.7s, status=ok
+   ↳ MD: scenarios/sc-08.md
+
+=== Сценарий 9: Возражение «дорого» + WhatsApp ===
+   ↳ 6 сообщений, 0 с карточками, 13.8s, status=ok
+   ↳ MD: scenarios/sc-09.md
+
+=== Сценарий 10: Памятка по стране (Таиланд) ===
+   ↳ 2 сообщений, 0 с карточками, 11.5s, status=ok
+   ↳ MD: scenarios/sc-10.md
+
+=== Сценарий 11: Длинный диалог: refine + сравнение + WhatsApp ===
+   ↳ 10 сообщений, 2 с карточками, 78.1s, status=ok
+   ↳ MD: scenarios/sc-11.md
+
+=== Сценарий 12: Горящие туры ===
+   ↳ 2 сообщений, 1 с карточками, 11.1s, status=ok
+   ↳ MD: scenarios/sc-12.md
+
+=== Сценарий 13: Edge-case: нереальные параметры ===
+   ↳ 2 сообщений, 0 с карточками, 11.4s, status=ok
+   ↳ MD: scenarios/sc-13.md
+
+localStorage seed: /Users/lukiansilagadze/Desktop/Cursor/навылет/test-reports/2026-05-05/sessions.json
+REPORT.md: /Users/lukiansilagadze/Desktop/Cursor/навылет/test-reports/2026-05-05/REPORT.md
+merge: подгружено 13 сессий из sessions.json
+
+=== Сценарий 2: Vision: скриншот переписки ===
+   ↳ 4 сообщений, 1 с карточками, 17.6s, status=ok
+   ↳ MD: scenarios/sc-02.md
+
+=== Сценарий 6: Деталь отеля + актуализация цены ===
+   ↳ 6 сообщений, 1 с карточками, 28.0s, status=ok
+   ↳ MD: scenarios/sc-06.md
+
+=== Сценарий 7: Подборка + share-ссылка + аналитика ===
+   ↳ 8 сообщений, 2 с карточками, 18.3s, status=ok
+   ↳ MD: scenarios/sc-07.md
+
+=== Сценарий 9: Возражение «дорого» + WhatsApp ===
+   ↳ 6 сообщений, 1 с карточками, 18.4s, status=ok
+   ↳ MD: scenarios/sc-09.md
+
+localStorage seed: /Users/lukiansilagadze/Desktop/Cursor/навылет/test-reports/2026-05-05/sessions.json (sessions: 13)
+REPORT.md: /Users/lukiansilagadze/Desktop/Cursor/навылет/test-reports/2026-05-05/REPORT.md
